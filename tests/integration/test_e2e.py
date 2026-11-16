@@ -477,3 +477,48 @@ def test_08_retention_and_maintenance_jobs(trino, fs, s3):
     run_job("iceberg_maintenance")
     assert trino.scalar("select count(*) from curated.borgerservice.fact_payment") == facts
     assert "ERROR=0" in dbt("test")
+
+
+# --- 7. concurrent key allocation ---------------------------------------------------------------
+
+
+def test_09_concurrent_allocation_never_duplicates_keys(trino, tmp_path):
+    """Three dbt processes allocate keys in the same keystore at the same moment (twice).
+
+    Iceberg commits all of the colliding inserts; the macro must detect that, withdraw and retry.
+    Whatever the timing, the keystore must end up without duplicates and without gaps.
+    """
+    succeeded = 0
+    for round_no in (1, 2):
+        procs = [
+            subprocess.Popen(  # noqa: S603
+                [
+                    "uv",
+                    "run",
+                    "--no-sync",
+                    "dbt",
+                    "run-operation",
+                    "keystore_selftest",  # noqa: S607
+                    "--args",
+                    f"{{tag: r{round_no}w{w}, count: 300}}",
+                    "--target-path",
+                    str(tmp_path / f"t{w}"),
+                    "--log-path",
+                    str(tmp_path / f"l{w}"),
+                ],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for w in range(3)
+        ]
+        for proc in procs:
+            out, _ = proc.communicate(timeout=300)
+            # a writer may give up after all attempts collided (safe); anything else is a bug
+            assert proc.returncode == 0 or "could not allocate keys without collision" in out, out[-2000:]
+            succeeded += proc.returncode == 0
+    ks = keystore(trino, "selftest_dim")
+    assert_dense_keys(ks)
+    assert len([k for k in ks if k > 0]) == 300 * succeeded and succeeded >= 1
+    assert trino.scalar("select count(*) from curated.keystore.selftest_dim where surrogate_key = -1") == 1
