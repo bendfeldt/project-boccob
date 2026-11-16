@@ -491,14 +491,14 @@ def test_09_concurrent_allocation_never_duplicates_keys(trino, tmp_path):
     succeeded = 0
     for round_no in (1, 2):
         procs = [
-            subprocess.Popen(  # noqa: S603
+            subprocess.Popen(
                 [
                     "uv",
                     "run",
                     "--no-sync",
                     "dbt",
                     "run-operation",
-                    "keystore_selftest",  # noqa: S607
+                    "keystore_selftest",
                     "--args",
                     f"{{tag: r{round_no}w{w}, count: 300}}",
                     "--target-path",
