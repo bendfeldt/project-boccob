@@ -8,6 +8,7 @@ This is O(size of the lake) and meant for erasure verification and tests, not fo
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import io
 import logging
@@ -50,10 +51,8 @@ def _avro_hits(data: bytes, needles: list[str]) -> bool:
 
 def _bytes_hit(data: bytes, needles: list[str]) -> bool:
     if data[:2] == b"\x1f\x8b":
-        try:
+        with contextlib.suppress(OSError):
             data = gzip.decompress(data)
-        except OSError:
-            pass
     return any(n.encode("utf-8") in data for n in needles)
 
 

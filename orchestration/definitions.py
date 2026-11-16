@@ -1,6 +1,5 @@
 """Dagster code location of the Boccob lakehouse solution."""
 
-
 import dagster as dg
 
 from orchestration.assets.ingestion import ingestion_assets

@@ -19,6 +19,7 @@ import yaml
 
 SUPPORTED_FORMATS = ("json", "jsonl", "csv", "xml", "parquet")
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+RESERVED_SOURCE_NAMES = ("iceberg",)  # prefix of the raw index tables in the raw bucket
 SOURCES_DIR = Path(__file__).resolve().parent.parent / "sources"
 
 
@@ -82,6 +83,8 @@ class SourceSpec:
     def __post_init__(self) -> None:
         if not _NAME.match(self.name):
             raise SpecError(f"source name {self.name!r} must match {_NAME.pattern}")
+        if self.name in RESERVED_SOURCE_NAMES:
+            raise SpecError(f"source name {self.name!r} is reserved")
         names = [e.name for e in self.entities]
         if len(set(names)) != len(names):
             raise SpecError(f"source {self.name}: duplicate entity names")

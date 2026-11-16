@@ -1,0 +1,479 @@
+"""End-to-end test on the podman harness (see harness.sh / scripts/integration-test.sh).
+
+The tests run in file order and build on each other:
+initial load -> changed load -> dimension rebuild -> idempotent re-run -> access control ->
+right to erasure -> another load -> retention and maintenance.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.integration
+
+ROOT = Path(__file__).resolve().parents[2]
+os.environ.setdefault("DBT_PROJECT_DIR", str(ROOT / "transform"))
+os.environ.setdefault("DBT_PROFILES_DIR", str(ROOT / "transform"))
+os.environ["ERASURE_VERIFY_STORAGE"] = "true"
+
+if not os.environ.get("TRINO_HOST"):
+    pytest.skip("integration harness environment not loaded (make integration)", allow_module_level=True)
+
+from governance.erasure.executor import submit_request  # noqa: E402
+from governance.erasure.storage_scan import scan_storage  # noqa: E402
+from ingestion.framework.manifest import read_manifests, sha256_hex  # noqa: E402
+from ingestion.framework.pseudonym import pseudonymise  # noqa: E402
+from ingestion.framework.spec import load_source  # noqa: E402
+from ingestion.sources.borgerportal import generator  # noqa: E402
+from lakehouse.settings import S3Settings, pseudonym_pepper  # noqa: E402
+from lakehouse.trino_client import TrinoClient  # noqa: E402
+
+SOURCE = load_source("borgerportal")
+SEED, CITIZENS = int(SOURCE.options["seed"]), int(SOURCE.options["citizens"])
+BUCKETS = ["lakehouse-raw", "lakehouse-clean", "lakehouse-consolidated", "lakehouse-curated"]
+LAYOUT = re.compile(r"^borgerportal/(\w+)/load_date=\d{4}-\d{2}-\d{2}/\d+\.\d+/[\w.]+$")
+state: dict = {}
+
+
+# --- helpers -----------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def trino():
+    return TrinoClient()  # svc-dagster: data-engineer + pii-reader
+
+
+@pytest.fixture(scope="module")
+def s3():
+    return S3Settings.from_env()
+
+
+@pytest.fixture(scope="module")
+def fs(s3):
+    return s3.filesystem()
+
+
+def run_job(name: str, partition_key: str | None = None, run_config: dict | None = None):
+    from orchestration.definitions import defs
+
+    result = defs.resolve_job_def(name).execute_in_process(
+        partition_key=partition_key, run_config=run_config, raise_on_error=False
+    )
+    failures = [str(e.event_specific_data)[:2000] for e in result.all_events if e.is_failure]
+    assert result.success, f"job {name} failed: {failures}"
+    return result
+
+
+def dbt(*args: str) -> str:
+    proc = subprocess.run(
+        ["uv", "run", "--no-sync", "dbt", *args],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
+    return proc.stdout
+
+
+def keystore(trino: TrinoClient, dimension: str) -> dict[int, dict]:
+    rows = trino.execute(
+        "select surrogate_key, business_key, version_key, member_type, key_created_at, "
+        f"key_last_used_in_fact_at, adopted_at from curated.keystore.{dimension}"
+    )
+    cols = ("sk", "bk", "vk", "type", "created", "last_used", "adopted")
+    return {r[0]: dict(zip(cols, r, strict=True)) for r in rows}
+
+
+def citizen_dim(trino: TrinoClient) -> dict[tuple, int]:
+    rows = trino.execute("select person_id, valid_from, citizen_key from curated.borgerservice.dim_citizen")
+    return {(r[0], r[1]): r[2] for r in rows}
+
+
+def fact_keys(trino: TrinoClient) -> dict[str, tuple]:
+    rows = trino.execute("select payment_id, citizen_key, case_type_key from curated.borgerservice.fact_payment")
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def assert_dense_keys(ks: dict[int, dict]) -> None:
+    positive = sorted(k for k in ks if k > 0)
+    assert positive == list(range(1, len(positive) + 1)), "surrogate keys must be sequential without gaps"
+    assert ks[-1]["type"] == "unknown"
+    pairs = [(v["bk"], v["vk"]) for v in ks.values()]
+    assert len(set(pairs)) == len(pairs), "duplicate (business key, version) in keystore"
+
+
+# --- 1. initial load ---------------------------------------------------------------------------
+
+
+def test_01_initial_load(trino, fs, s3):
+    result = run_job("daily_refresh", partition_key="2026-11-01")
+    checks = [e for e in result.all_events if e.event_type_value == "ASSET_CHECK_EVALUATION"]
+    assert len(checks) >= 40 and all(c.event_specific_data.passed for c in checks)
+
+    # LAND: contract layout, manifest checksums, native bytes untouched
+    loads = read_manifests(fs, s3.raw_bucket, "borgerportal")
+    assert len(loads) == 1
+    ((load_id, entries),) = loads.items()
+    assert {e.entity for e in entries} == {"citizens", "cases", "payments", "case_types"}
+    batch = generator.simulate(SEED, 1, CITIZENS)
+    native = {
+        "citizens": generator.citizens_json(batch),
+        "cases": generator.cases_xml(batch),
+        "payments": generator.payments_csv(batch),
+        "case_types": generator.case_types_parquet(batch),
+    }
+    for e in entries:
+        assert LAYOUT.match(e.path), e.path
+        content = fs.cat_file(f"{s3.raw_bucket}/{e.path}")
+        assert sha256_hex(content) == e.sha256 and len(content) == e.size_bytes
+        assert content == native[e.entity], f"{e.entity}: landed file differs from what the source delivered"
+        # INDEX: one row per source record, tied to file and load
+        rows = trino.execute(
+            f"select count(*), count(distinct _raw_row), min(_load_id), min(_raw_sha256) "
+            f"from raw.borgerportal.{e.entity} where _raw_file = ?",
+            [e.path],
+        )
+        assert rows[0] == [e.record_count, e.record_count, load_id, e.sha256]
+
+    # CLEAN: typed, deduplicated, pseudonymised
+    expected_versions = {(c["cpr"], c["updated_at"]) for c in batch.citizens}
+    assert trino.scalar("select count(*) from clean.borgerportal.citizens") == len(expected_versions)
+    assert trino.scalar("select count(*) from clean.borgerportal.payments") == len(
+        {p["payment_id"] for p in batch.payments}
+    )
+    pepper = pseudonym_pepper()
+    sample = batch.citizens[0]["cpr"]
+    assert trino.scalar("select citizen_id from clean.borgerportal.citizens where cpr_number = ?", [sample]) == (
+        pseudonymise(sample, pepper)
+    )
+    amount, pay_date = trino.execute(
+        "select amount, payment_date from clean.borgerportal.payments where payment_id = ?",
+        [batch.payments[0]["payment_id"]],
+    )[0]
+    assert str(amount) == batch.payments[0]["amount"].replace(".", "").replace(",", ".")
+    assert pay_date.strftime("%d-%m-%Y") == batch.payments[0]["payment_date"]
+
+    # the CPR number stays in clean: no column and no stored value beyond it
+    cpr_columns = trino.execute(
+        "select table_catalog from consolidated.information_schema.columns where column_name like '%cpr%' "
+        "union all select table_catalog from curated.information_schema.columns where column_name like '%cpr%'"
+    )
+    assert cpr_columns == []
+    assert scan_storage(fs, ["lakehouse-consolidated", "lakehouse-curated"], [sample]) == []
+    assert scan_storage(fs, ["lakehouse-clean"], [sample]) != [], "sanity: the scanner must find the CPR in clean"
+
+    # KEYSTORE
+    ks = keystore(trino, "dim_citizen")
+    assert_dense_keys(ks)
+    held_back = {p["cpr"] for p in batch.payments} - {c["cpr"] for c in batch.citizens}
+    inferred = {v["bk"] for v in ks.values() if v["type"] == "inferred"}
+    assert inferred == {pseudonymise(c, pepper) for c in held_back} and inferred
+    facts = fact_keys(trino)
+    assert facts and all(ck > 0 and tk > 0 for ck, tk in facts.values()), "no fact row may fall back to -1"
+    used = {ck for ck, _ in facts.values()}
+    assert all(ks[k]["last_used"] is not None and ks[k]["last_used"] >= ks[k]["created"] for k in used)
+    assert all(v["last_used"] is None for k, v in ks.items() if k not in used)
+    assert_dense_keys(keystore(trino, "dim_case_type"))
+
+    dbt("run-operation", "keystore_snapshot_baseline", "--args", "{dimensions: [dim_citizen, dim_case_type]}")
+    state.update(ks1=ks, facts1=facts, inferred1=inferred, dim1=citizen_dim(trino))
+
+
+# --- 2. changed load ---------------------------------------------------------------------------
+
+
+def test_02_changed_load_reuses_keys_and_builds_scd2(trino):
+    run_job("daily_refresh", partition_key="2026-11-02")
+    ks1, ks2 = state["ks1"], keystore(trino, "dim_citizen")
+    assert_dense_keys(ks2)
+
+    # existing keys: never regenerated, creation timestamp untouched
+    for sk, before in ks1.items():
+        after = ks2[sk]
+        assert after["bk"] == before["bk"] and after["created"] == before["created"]
+        if before["type"] == "inferred":
+            # master data arrived: the inferred member keeps its key and becomes a regular version
+            assert after["type"] == "regular" and after["adopted"] is not None and after["vk"] != before["vk"]
+        else:
+            assert after["vk"] == before["vk"] and after["type"] == before["type"]
+    new_keys = set(ks2) - set(ks1)
+    assert new_keys and min(new_keys) > max(ks1), "new keys continue the sequence"
+
+    # last-used semantics: only keys referenced by facts written in this run are re-stamped
+    latest = trino.scalar("select max_by(_invocation_id, _transformed_at) from curated.borgerservice.fact_payment")
+    used_now = {
+        r[0]
+        for r in trino.execute(
+            "select distinct citizen_key from curated.borgerservice.fact_payment where _invocation_id = ?", [latest]
+        )
+    }
+    assert used_now
+    for sk, before in ks1.items():
+        after = ks2[sk]
+        if sk in used_now:
+            assert after["last_used"] is not None
+            assert before["last_used"] is None or after["last_used"] > before["last_used"]
+        else:
+            assert after["last_used"] == before["last_used"]
+    assert all(ks2[sk]["last_used"] is not None for sk in used_now)
+
+    # facts loaded in run 1 keep their keys
+    facts2 = fact_keys(trino)
+    assert all(facts2[p] == keys for p, keys in state["facts1"].items())
+    assert len(facts2) > len(state["facts1"])
+
+    # SCD2: changed citizens have several versions, intervals contiguous and non overlapping
+    versions = trino.execute(
+        "select person_id, valid_from, valid_to, is_current from curated.borgerservice.dim_citizen "
+        "where not is_inferred and citizen_key > 0 order by person_id, valid_from"
+    )
+    by_person: dict[str, list] = {}
+    for person, vf, vt, cur in versions:
+        by_person.setdefault(person, []).append((vf, vt, cur))
+    assert any(len(v) > 1 for v in by_person.values()), "the changed load must create SCD2 versions"
+    for intervals in by_person.values():
+        assert [c for _, _, c in intervals].count(True) == 1 and intervals[-1][2]
+        for (_, vt, _), (vf_next, _, _) in itertools.pairwise(intervals):
+            assert vt == vf_next
+        assert all(vf < vt for vf, vt, _ in intervals)
+    assert trino.scalar("select count(*) from curated.borgerservice.dim_citizen where is_current and is_deregistered")
+
+    # every fact (incl. late arriving ones) points at the version valid on its payment date
+    misplaced = trino.scalar(
+        """select count(*) from curated.borgerservice.fact_payment f
+           join clean.borgerportal.payments p on p.payment_id = f.payment_id
+           join curated.borgerservice.dim_citizen d on d.citizen_key = f.citizen_key
+           where not (cast(p.payment_date as timestamp(6) with time zone) >= d.valid_from
+                      and cast(p.payment_date as timestamp(6) with time zone) < d.valid_to)"""
+    )
+    assert misplaced == 0
+    late = trino.scalar("select count(*) from clean.borgerportal.payments where payment_date < cast(booked_at as date)")
+    assert late > 0, "the changed load contains late arriving facts"
+    # SCD1 dimension: new reference row got a key, existing ones unchanged
+    types = keystore(trino, "dim_case_type")
+    assert_dense_keys(types)
+    assert {v["bk"] for v in types.values()} >= {"FLY", "BYG"}
+    assert all(v["vk"] == "" for v in types.values() if v["type"] == "regular")
+    state.update(ks2=ks2, facts2=facts2, dim2=citizen_dim(trino), types2=types)
+
+
+# --- 3. rebuild --------------------------------------------------------------------------------
+
+
+def test_03_full_rebuild_keeps_every_key(trino):
+    trino.execute("drop table curated.borgerservice.dim_citizen")
+    trino.execute("drop table curated.borgerservice.dim_case_type")
+    out = dbt("build", "--full-refresh")  # clean, consolidated, curated rebuilt from the raw index
+    assert "keystore_stable_since_baseline_dim_citizen" in out and "ERROR=0" in out
+
+    ks3 = keystore(trino, "dim_citizen")
+    strip = lambda ks: {k: (v["bk"], v["vk"], v["type"], v["created"]) for k, v in ks.items()}  # noqa: E731
+    assert strip(ks3) == strip(state["ks2"]), "a rebuild must neither create nor change keys"
+    assert citizen_dim(trino) == state["dim2"], "dimension rows get exactly the keys they had"
+    assert fact_keys(trino) == state["facts2"], "facts resolve to the same keys after a full refresh"
+    assert strip(keystore(trino, "dim_case_type")) == strip(state["types2"])
+
+
+def test_04_rerun_without_new_data_is_idempotent(trino):
+    from ingestion.framework.indexing import index_source
+
+    assert index_source(SOURCE).rows == {}, "no committed load is pending"
+    counts_before = trino.execute("select count(*) from raw.borgerportal.citizens")
+    dbt("build")
+    assert trino.execute("select count(*) from raw.borgerportal.citizens") == counts_before
+    assert set(keystore(trino, "dim_citizen")) == set(state["ks2"])
+    assert fact_keys(trino) == state["facts2"]
+
+
+# --- 4. access control (OPA through Trino) -----------------------------------------------------
+
+
+def _as(user: str, sql: str):
+    return TrinoClient(user=user).execute(sql)
+
+
+def test_05_access_control_and_masking():
+    import trino.exceptions
+
+    denied = trino.exceptions.TrinoUserError
+    assert _as("anna-analyst", "show catalogs") == [["curated"], ["system"]]
+    schemas = {r[0] for r in _as("anna-analyst", "show schemas from curated")}
+    assert "borgerservice" in schemas and "keystore" not in schemas and "audit" not in schemas
+
+    name, email, postal = _as(
+        "anna-analyst",
+        "select full_name, email, postal_code from curated.borgerservice.dim_citizen "
+        "where citizen_key > 0 and full_name is not null limit 1",
+    )[0]
+    assert name == "*****" and email.startswith("*****@") and re.fullmatch(r"\d{4}", postal)
+    clear = _as(
+        "petra-pii",
+        "select full_name, email from curated.borgerservice.dim_citizen "
+        "where citizen_key > 0 and full_name is not null limit 1",
+    )[0]
+    assert clear[0] != "*****" and not clear[1].startswith("*****")
+
+    for sql in (
+        "select * from clean.borgerportal.citizens",
+        "select * from raw.borgerportal.citizens",
+        "select * from curated.keystore.dim_citizen",
+        "delete from curated.borgerservice.fact_payment",
+        "select * from system.runtime.queries",
+    ):
+        with pytest.raises(denied):
+            _as("anna-analyst", sql)
+    with pytest.raises(denied):
+        _as("mallory", "select 1")
+
+    # engineers work on all layers but see classified columns masked unless they are pii readers
+    cpr, city = _as("erik-engineer", "select cpr_number, city from clean.borgerportal.citizens limit 1")[0]
+    assert cpr == "*****" and city
+    assert _as("erik-engineer", "select payload from raw.borgerportal.citizens limit 1") == [[None]]
+    assert re.fullmatch(
+        r"\d{6}-\d{4}", _as("svc-dagster", "select cpr_number from clean.borgerportal.citizens limit 1")[0][0]
+    )
+
+    # auditor: read only, masked, may inspect query history
+    assert _as("axel-auditor", "select cpr_number from clean.borgerportal.citizens limit 1") == [["*****"]]
+    assert _as("axel-auditor", "select count(*) from system.runtime.queries")[0][0] > 0
+    with pytest.raises(denied):
+        _as("axel-auditor", "delete from clean.borgerportal.citizens")
+
+    # row filter: small cells of the data product are hidden from analysts
+    total, small = _as(
+        "petra-pii", "select count(*), count_if(is_small_cell) from curated.borgerservice.dp_payment_summary_v1"
+    )[0]
+    visible = _as("anna-analyst", "select count(*) from curated.borgerservice.dp_payment_summary_v1")[0][0]
+    assert small > 0 and visible == total - small
+
+
+# --- 5. right to erasure -----------------------------------------------------------------------
+
+
+def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
+    pepper = pseudonym_pepper()
+    cpr = trino.scalar(
+        """select c.cpr_number from clean.borgerportal.citizens c
+           join clean.borgerportal.payments p on p.citizen_id = c.citizen_id
+           group by c.cpr_number having count(distinct c.source_updated_at) > 1 limit 1"""
+    )
+    assert cpr, "need a citizen with history and payments"
+    key = pseudonymise(cpr, pepper)
+    subject_keys = [
+        r[0]
+        for r in trino.execute("select surrogate_key from curated.keystore.dim_citizen where business_key = ?", [key])
+    ]
+    assert len(subject_keys) > 1
+    in_list = ", ".join(str(k) for k in subject_keys)
+    fact_rows = trino.scalar(
+        f"select count(*) from curated.borgerservice.fact_payment where citizen_key in ({in_list})"
+    )
+    max_key = max(keystore(trino, "dim_citizen"))
+
+    before = scan_storage(fs, BUCKETS, [cpr, key])
+    for bucket in BUCKETS:
+        assert any(h.startswith(f"s3://{bucket}/") for h in before), f"sanity: subject must be present in {bucket}"
+
+    request_id = submit_request(identifier=cpr, requested_by="dpo@kommune.example", reason="integration test")
+    result = run_job("erasure")  # GovernanceResource verifies the object store itself (ERASURE_VERIFY_STORAGE)
+    events = json.dumps([str(e.event_specific_data) for e in result.all_events])
+    assert cpr not in events and key not in events, "no identifier may leak into orchestrator events"
+
+    # physically gone: no object in any bucket contains the CPR number or the pseudonym
+    assert scan_storage(fs, BUCKETS, [cpr, key]) == []
+    for table, column in (
+        ("clean.borgerportal.citizens", "citizen_id"),
+        ("clean.borgerportal.cases", "citizen_id"),
+        ("clean.borgerportal.payments", "citizen_id"),
+        ("consolidated.party.person", "person_id"),
+        ("curated.borgerservice.dim_citizen", "person_id"),
+        ("curated.keystore.dim_citizen", "business_key"),
+        ("curated.keystore.dim_citizen__baseline", "business_key"),
+    ):
+        assert trino.scalar(f"select count(*) from {table} where {column} = ?", [key]) == 0, table
+    for entity in ("citizens", "cases", "payments"):
+        assert (
+            trino.scalar(f"select count(*) from raw.borgerportal.{entity} where _subject_keys like ?", [f"%{key}%"])
+            == 0
+        )
+        assert trino.scalar(f"select count(*) from raw.borgerportal.{entity} where payload like ?", [f"%{cpr}%"]) == 0
+    # time travel is gone as well: only the post-erasure snapshot remains
+    assert trino.scalar('select count(*) from clean.borgerportal."citizens$snapshots"') == 1
+
+    # keystore: integer keys survive as anonymous members and are never handed out again
+    ks = keystore(trino, "dim_citizen")
+    for sk in subject_keys:
+        assert ks[sk]["type"] == "erased" and ks[sk]["bk"] == f"erased:{sk}"
+    assert max(ks) == max_key
+    # facts stay (bookkeeping) but only reference the anonymous member; indirect identifiers are nulled
+    rows = trino.execute(
+        f"select count(*), count(case_id) from curated.borgerservice.fact_payment where citizen_key in ({in_list})"
+    )
+    assert rows == [[fact_rows, 0]]
+    erased_dim = trino.execute(
+        f"select full_name, email, is_erased from curated.borgerservice.dim_citizen where citizen_key in ({in_list})"
+    )
+    assert len(erased_dim) == len(subject_keys) and all(r == [None, None, True] for r in erased_dim)
+
+    # audit record without identifiers; request queue emptied
+    audit = trino.execute(
+        "select status, requested_by, executed_by, reason, subject_digest, details from curated.audit.erasure_log"
+    )
+    assert len(audit) == 1 and audit[0][:3] == ["completed", "dpo@kommune.example", "svc-dagster"]
+    assert request_id in audit[0][3]
+    assert cpr not in json.dumps(audit) and key not in json.dumps(audit)
+    assert trino.scalar("select count(*) from curated.audit.erasure_requests") == 0
+    # a raw file that contained the subject is replaced by a tombstone, its other records stay indexed
+    tombstones = [p for p in fs.find(s3.raw_bucket) if p.endswith(".erased.json")]
+    assert tombstones and all(not fs.exists(p.removesuffix(".erased.json")) for p in tombstones)
+    assert trino.scalar("select count(*) from raw.borgerportal.citizens") > 0
+
+    # the lakehouse keeps working: rebuild is consistent and all tests still pass
+    assert "ERROR=0" in dbt("build")
+    after = keystore(trino, "dim_citizen")
+    assert {sk: after[sk]["type"] for sk in subject_keys} == dict.fromkeys(subject_keys, "erased")
+    state.update(erased_keys=subject_keys, max_key=max_key)
+
+
+def test_07_next_load_after_erasure(trino):
+    run_job("daily_refresh", partition_key="2026-11-03")
+    ks = keystore(trino, "dim_citizen")
+    assert_dense_keys(ks)
+    for sk in state["erased_keys"]:
+        assert ks[sk]["type"] == "erased", "erased keys are never reassigned"
+    for sk, before in state["ks2"].items():
+        if sk not in state["erased_keys"]:
+            assert ks[sk]["bk"] == before["bk"] and ks[sk]["created"] == before["created"]
+
+
+# --- 6. retention and maintenance --------------------------------------------------------------
+
+
+def test_08_retention_and_maintenance_jobs(trino, fs, s3):
+    from datetime import date
+
+    from governance.retention.runner import run_retention
+
+    facts = trino.scalar("select count(*) from curated.borgerservice.fact_payment")
+    objects = len(fs.find(f"{s3.raw_bucket}/borgerportal/"))
+    run_job("retention")
+    assert trino.scalar("select count(*) from curated.borgerservice.fact_payment") == facts, "nothing is expired yet"
+    assert len(fs.find(f"{s3.raw_bucket}/borgerportal/")) == objects
+
+    future = run_retention(dry_run=True, today=date(2040, 1, 1))
+    expired = {t["table"]: t["rows"] for t in future["tables"]}
+    assert expired["curated.borgerservice.fact_payment"] == facts
+    assert expired["raw.borgerportal.citizens"] > 0 and future["landing_objects"] > 0
+    assert trino.scalar("select count(*) from curated.borgerservice.fact_payment") == facts, "dry run deletes nothing"
+
+    run_job("iceberg_maintenance")
+    assert trino.scalar("select count(*) from curated.borgerservice.fact_payment") == facts
+    assert "ERROR=0" in dbt("test")

@@ -133,7 +133,7 @@ JSON
 
   log "starting Trino"
   local etc="$STATE_DIR/trino-etc"
-  rm -rf "$etc"; mkdir -p "$etc/catalog"
+  rm -rf -- "${etc:?}"; mkdir -p "$etc/catalog"
   cp "$HERE/trino/config.properties" "$HERE/trino/jvm.config" "$HERE/trino/node.properties" \
      "$HERE/trino/log.properties" "$HERE/trino/group-provider.properties" "$HERE/trino/groups.txt" "$etc/"
   if [[ "$WITH_OPA" == "1" ]]; then cp "$HERE/trino/access-control.properties" "$etc/"; fi
@@ -160,7 +160,7 @@ JSON
 down() {
   podman rm -f -t 2 sol-trino sol-opa sol-polaris sol-rustfs >/dev/null 2>&1 || true
   podman network rm -f "$NET" >/dev/null 2>&1 || true
-  rm -rf "$STATE_DIR"
+  rm -rf -- "${STATE_DIR:?}"
   log "harness removed"
 }
 

@@ -43,17 +43,17 @@ def retention_session(catalogs: list[str], minimum: str = "0s") -> dict[str, str
     return props
 
 
-def list_tables(trino: TrinoClient, catalog: str, exclude_schemas: tuple[str, ...] = ("information_schema", "system"),
-                schema: str | None = None) -> list[TableRef]:
+def list_tables(
+    trino: TrinoClient,
+    catalog: str,
+    exclude_schemas: tuple[str, ...] = ("information_schema", "system"),
+    schema: str | None = None,
+) -> list[TableRef]:
     rows = trino.execute(
         f"select table_schema, table_name from {ident(catalog)}.information_schema.tables "
         "where table_type = 'BASE TABLE' order by 1, 2"
     )
-    return [
-        TableRef(catalog, s, t)
-        for s, t in rows
-        if s not in exclude_schemas and (schema is None or s == schema)
-    ]
+    return [TableRef(catalog, s, t) for s, t in rows if s not in exclude_schemas and (schema is None or s == schema)]
 
 
 def optimize(trino: TrinoClient, table: TableRef, file_size_threshold: str | None = None) -> None:
@@ -78,12 +78,43 @@ def remove_orphan_files(trino: TrinoClient, table: TableRef, retention: str) -> 
     trino.execute(f"alter table {table.sql} execute remove_orphan_files(retention_threshold => '{retention}')")
 
 
+def optimize_manifests(trino: TrinoClient, table: TableRef) -> None:
+    """Rewrite the manifests of the current snapshot. Entries of removed data files (which carry
+    the min/max column values of those files) are not carried over."""
+    trino.execute(f"alter table {table.sql} execute optimize_manifests")
+
+
+def reset_empty_table(trino: TrinoClient, table: TableRef) -> bool:
+    """Replace an empty table by itself (same definition and location).
+
+    When the last rows of a table are deleted there is nothing left to rewrite, so the manifests
+    that record the removed files - including their column bounds - would stay part of the current
+    snapshot. Replacing the table starts a new snapshot without any manifest; the old ones are then
+    removed by expire_snapshots. Returns True when the table was reset.
+    """
+    if trino.scalar(f"select count(*) from {table.sql}") != 0:
+        return False
+    ddl = trino.scalar(f"show create table {table.sql}")
+    if not ddl.startswith("CREATE TABLE "):
+        raise RuntimeError(f"unexpected DDL for {table}: {ddl[:60]!r}")
+    trino.execute("CREATE OR REPLACE TABLE " + ddl[len("CREATE TABLE ") :])
+    return True
+
+
 def purge_history(trino: TrinoClient, table: TableRef) -> None:
-    """Make deleted rows physically unrecoverable: rewrite, drop all old snapshots, drop orphans.
+    """Make deleted rows physically unrecoverable.
+
+    1. optimize             data files that carry row-level deletes are rewritten without those rows
+    2. optimize_manifests   manifest entries of removed files (with their column bounds) are dropped
+    3. reset_empty_table    covers the case that nothing is left to rewrite
+    4. expire_snapshots(0s) every older snapshot with its data files, delete files and manifests goes
+    5. remove_orphan_files(0s)
 
     Requires a connection created with :func:`retention_session` (0s floor). Must not run while
     other writers are active on the table: files of in-flight commits would count as orphans.
     """
     optimize(trino, table)
+    optimize_manifests(trino, table)
+    reset_empty_table(trino, table)
     expire_snapshots(trino, table, "0s")
     remove_orphan_files(trino, table, "0s")

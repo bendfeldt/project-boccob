@@ -35,8 +35,9 @@ class RetentionPlan:
     skipped: list[str] = field(default_factory=list)  # tables without a time based rule
 
 
-def plan_retention(tables: list[cm.TableClass], sources: list[SourceSpec], config: RetentionConfig,
-                   today: date) -> RetentionPlan:
+def plan_retention(
+    tables: list[cm.TableClass], sources: list[SourceSpec], config: RetentionConfig, today: date
+) -> RetentionPlan:
     """Pure planning step (unit tested): which rows/files have outlived their retention."""
     plan = RetentionPlan()
     raw = config.layers["raw"]
@@ -49,11 +50,13 @@ def plan_retention(tables: list[cm.TableClass], sources: list[SourceSpec], confi
         for source in sources:
             for entity in source.entities:
                 table = fqn(catalog_of("raw"), source.name, entity.name)
-                plan.statements.append(DeleteStatement(
-                    table=f"{catalog_of('raw')}.{source.name}.{entity.name}",
-                    sql=f"delete from {table} where _loaded_at < timestamp '{cutoff.isoformat()} 00:00:00 UTC'",
-                    reason=f"raw index retention {raw.index_days}d",
-                ))
+                plan.statements.append(
+                    DeleteStatement(
+                        table=f"{catalog_of('raw')}.{source.name}.{entity.name}",
+                        sql=f"delete from {table} where _loaded_at < timestamp '{cutoff.isoformat()} 00:00:00 UTC'",
+                        reason=f"raw index retention {raw.index_days}d",
+                    )
+                )
     for t in tables:
         if t.resource_type != "model":
             continue
@@ -63,17 +66,22 @@ def plan_retention(tables: list[cm.TableClass], sources: list[SourceSpec], confi
                 plan.skipped.append(t.key)
             continue
         cutoff = today - timedelta(days=int(days))
-        plan.statements.append(DeleteStatement(
-            table=t.key,
-            sql=(f"delete from {fqn(t.catalog, t.schema, t.table)} "
-                 f"where cast({ident(column)} as date) < date '{cutoff.isoformat()}'"),
-            reason=f"retention {days}d on {column}",
-        ))
+        plan.statements.append(
+            DeleteStatement(
+                table=t.key,
+                sql=(
+                    f"delete from {fqn(t.catalog, t.schema, t.table)} "
+                    f"where cast({ident(column)} as date) < date '{cutoff.isoformat()}'"
+                ),
+                reason=f"retention {days}d on {column}",
+            )
+        )
     return plan
 
 
-def expired_landing_objects(keys: list[str], committed_load_ids: set[str], landing_cutoff: date | None,
-                            uncommitted_cutoff: date | None) -> list[str]:
+def expired_landing_objects(
+    keys: list[str], committed_load_ids: set[str], landing_cutoff: date | None, uncommitted_cutoff: date | None
+) -> list[str]:
     """Select object keys (relative to the bucket) whose retention has expired."""
     expired = []
     for key in keys:
@@ -81,15 +89,16 @@ def expired_landing_objects(keys: list[str], committed_load_ids: set[str], landi
         if not m:
             continue
         load_date, load_id = date.fromisoformat(m.group(1)), m.group(2)
-        if landing_cutoff and load_date < landing_cutoff:
-            expired.append(key)
-        elif uncommitted_cutoff and load_id not in committed_load_ids and load_date < uncommitted_cutoff:
+        too_old = bool(landing_cutoff and load_date < landing_cutoff)
+        aborted = bool(uncommitted_cutoff and load_id not in committed_load_ids and load_date < uncommitted_cutoff)
+        if too_old or aborted:
             expired.append(key)
     return expired
 
 
-def run_retention(*, dry_run: bool = False, today: date | None = None, trino: TrinoClient | None = None,
-                  s3: S3Settings | None = None) -> dict[str, Any]:
+def run_retention(
+    *, dry_run: bool = False, today: date | None = None, trino: TrinoClient | None = None, s3: S3Settings | None = None
+) -> dict[str, Any]:
     today = today or datetime.now(UTC).date()
     config = load_retention()
     sources = list_sources()
@@ -98,8 +107,13 @@ def run_retention(*, dry_run: bool = False, today: date | None = None, trino: Tr
     trino = trino or TrinoClient(source="lakehouse-retention")
     s3 = s3 or S3Settings.from_env()
     fs = s3.filesystem()
-    report: dict[str, Any] = {"dry_run": dry_run, "date": today.isoformat(), "tables": [], "landing_objects": 0,
-                              "no_time_rule": plan.skipped}
+    report: dict[str, Any] = {
+        "dry_run": dry_run,
+        "date": today.isoformat(),
+        "tables": [],
+        "landing_objects": 0,
+        "no_time_rule": plan.skipped,
+    }
 
     for stmt in plan.statements:
         catalog, schema, table = stmt.table.split(".")
@@ -115,13 +129,16 @@ def run_retention(*, dry_run: bool = False, today: date | None = None, trino: Tr
 
     for source in sources:
         prefix = f"{s3.raw_bucket}/{source.name}/"
-        keys = [p[len(s3.raw_bucket) + 1:] for p in fs.find(prefix)]
+        keys = [p[len(s3.raw_bucket) + 1 :] for p in fs.find(prefix)]
         manifests = [k for k in keys if k.startswith(f"{source.name}/{MANIFEST_TABLE}/")]
         committed = {k.rsplit("/", 1)[1].rsplit(".", 2)[0] for k in manifests}
         expired = expired_landing_objects(keys, committed, plan.landing_cutoff, plan.uncommitted_cutoff)
         if plan.landing_cutoff:
-            expired += [k for k in manifests
-                        if date.fromisoformat(load_date_of(k.rsplit("/", 1)[1].rsplit(".", 2)[0])) < plan.landing_cutoff]
+            expired += [
+                k
+                for k in manifests
+                if date.fromisoformat(load_date_of(k.rsplit("/", 1)[1].rsplit(".", 2)[0])) < plan.landing_cutoff
+            ]
         report["landing_objects"] += len(expired)
         if not dry_run:
             for key in expired:

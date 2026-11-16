@@ -95,12 +95,15 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
                 f"json_extract_scalar(_subject_keys, '$.{ident(n)[1:-1]}') = {lit}" for n in sorted(entity.identifiers)
             )
             plan.raw_file_queries.append((name, f"select distinct _raw_file from {table} where {match}"))
-            plan.steps.append(Step(
-                table=name, action="raw_index",
-                statements=(f"delete from {table} where {match}",),
-                count_sql=f"select count(*) from {table} where {match}",
-                verify_sql=f"select count(*) from {table} where {match}",
-            ))
+            plan.steps.append(
+                Step(
+                    table=name,
+                    action="raw_index",
+                    statements=(f"delete from {table} where {match}",),
+                    count_sql=f"select count(*) from {table} where {match}",
+                    verify_sql=f"select count(*) from {table} where {match}",
+                )
+            )
 
     models = [t for t in tables if t.resource_type == "model"]
     order = {"clean": 0, "consolidated": 1, "curated": 2}
@@ -123,11 +126,15 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
             # after the keystore step the business key is gone: verify through erased members
             erased = f"select surrogate_key from {keystore_table(dim.name)} where member_type = 'erased'"
             verify = f"select count(*) from {target} where {key_col} in ({erased}) and ({not_null})"
-        plan.steps.append(Step(
-            table=t.key, action="anonymise", statements=statements,
-            count_sql=f"select count(*) from {target} where {key_col} in ({keys})",
-            verify_sql=verify,
-        ))
+        plan.steps.append(
+            Step(
+                table=t.key,
+                action="anonymise",
+                statements=statements,
+                count_sql=f"select count(*) from {target} where {key_col} in ({keys})",
+                verify_sql=verify,
+            )
+        )
 
     # 3. plain deletes, clean -> consolidated -> curated
     for t in sorted(models, key=lambda t: order.get(t.layer or "", 9)):
@@ -135,12 +142,15 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
             continue
         target = fqn(t.catalog, t.schema, t.table)
         where = f"{ident(t.gdpr['subject_column'])} = {lit}"
-        plan.steps.append(Step(
-            table=t.key, action="delete",
-            statements=(f"delete from {target} where {where}",),
-            count_sql=f"select count(*) from {target} where {where}",
-            verify_sql=f"select count(*) from {target} where {where}",
-        ))
+        plan.steps.append(
+            Step(
+                table=t.key,
+                action="delete",
+                statements=(f"delete from {target} where {where}",),
+                count_sql=f"select count(*) from {target} where {where}",
+                verify_sql=f"select count(*) from {target} where {where}",
+            )
+        )
 
     # 4. dimensions + keystore last
     for t in models:
@@ -151,8 +161,11 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
         ks = keystore_table(t.name)
         sk, bk = ident(s["surrogate_key"]), ident(s["business_key"])
         scd2_cols = ", valid_from, valid_to, is_current" if s["scd_type"] == 2 else ""
-        scd2_vals = (", timestamp '1900-01-01 00:00:00.000000 UTC', timestamp '9999-12-31 00:00:00.000000 UTC', true"
-                     if s["scd_type"] == 2 else "")
+        scd2_vals = (
+            ", timestamp '1900-01-01 00:00:00.000000 UTC', timestamp '9999-12-31 00:00:00.000000 UTC', true"
+            if s["scd_type"] == 2
+            else ""
+        )
         statements = (
             # anonymous placeholders keep facts joinable; they carry no attribute and no business key
             f"insert into {dim} ({sk}, {bk}, is_inferred, is_erased{scd2_cols}) "
@@ -162,15 +175,25 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
             f"update {ks} set business_key = 'erased:' || cast(surrogate_key as varchar), "
             f"version_key = 'erased', member_type = 'erased' where business_key = {lit}",
         )
-        plan.steps.append(Step(
-            table=t.key, action="keystore", statements=statements,
-            count_sql=f"select count(*) from {dim} where {bk} = {lit}",
-            verify_sql=(f"select (select count(*) from {dim} where {bk} = {lit}) "
-                        f"+ (select count(*) from {ks} where business_key = {lit})"),
-        ))
-        plan.steps.append(Step(
-            table=f"{catalog_of('curated')}.{KEYSTORE_SCHEMA}.{t.name}", action="keystore", statements=(),
-            count_sql=f"select count(*) from {ks} where business_key = {lit}",
-            verify_sql=f"select count(*) from {ks} where business_key = {lit}",
-        ))
+        plan.steps.append(
+            Step(
+                table=t.key,
+                action="keystore",
+                statements=statements,
+                count_sql=f"select count(*) from {dim} where {bk} = {lit}",
+                verify_sql=(
+                    f"select (select count(*) from {dim} where {bk} = {lit}) "
+                    f"+ (select count(*) from {ks} where business_key = {lit})"
+                ),
+            )
+        )
+        plan.steps.append(
+            Step(
+                table=f"{catalog_of('curated')}.{KEYSTORE_SCHEMA}.{t.name}",
+                action="keystore",
+                statements=(),
+                count_sql=f"select count(*) from {ks} where business_key = {lit}",
+                verify_sql=f"select count(*) from {ks} where business_key = {lit}",
+            )
+        )
     return plan

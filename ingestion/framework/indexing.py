@@ -84,8 +84,9 @@ def subject_keys(record_json: str, entity: EntitySpec, pepper: str | None) -> st
     return json.dumps(keys, sort_keys=True) if keys else None
 
 
-def records_table(entry: ManifestEntry, entity: EntitySpec, content: bytes, pepper: str | None,
-                  loaded_at: datetime) -> Iterator[pa.Table]:
+def records_table(
+    entry: ManifestEntry, entity: EntitySpec, content: bytes, pepper: str | None, loaded_at: datetime
+) -> Iterator[pa.Table]:
     """Render one native file into index rows (pure function of file bytes + config)."""
     if sha256_hex(content) != entry.sha256:
         raise ChecksumMismatchError(f"{entry.path}: content does not match the manifest checksum")
@@ -115,8 +116,14 @@ def records_table(entry: ManifestEntry, entity: EntitySpec, content: bytes, pepp
         yield flush()
 
 
-def index_source(source: SourceSpec, *, load_id: str | None = None, reindex: bool = False,
-                 s3: S3Settings | None = None, polaris: PolarisSettings | None = None) -> IndexResult:
+def index_source(
+    source: SourceSpec,
+    *,
+    load_id: str | None = None,
+    reindex: bool = False,
+    s3: S3Settings | None = None,
+    polaris: PolarisSettings | None = None,
+) -> IndexResult:
     """Index committed loads of ``source`` that are not indexed yet (or exactly ``load_id``)."""
     dlt_support.configure_runtime()
     s3 = s3 or S3Settings.from_env()

@@ -23,20 +23,79 @@ import json
 import random
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from xml.etree import ElementTree as ET  # noqa: S405 - only used to *write* XML
+from xml.etree import ElementTree as ET
 
-FIRST_NAMES = ["Anne", "Peter", "Mette", "Lars", "Sofie", "Jens", "Freja", "Mads", "Ida", "Søren",
-               "Emma", "Niels", "Karen", "Rasmus", "Lærke", "Henrik", "Astrid", "Mikkel", "Signe", "Åge"]
-LAST_NAMES = ["Jensen", "Nielsen", "Hansen", "Pedersen", "Andersen", "Christensen", "Larsen",
-              "Sørensen", "Rasmussen", "Jørgensen", "Petersen", "Madsen", "Kristensen", "Olsen", "Thomsen"]
-STREETS = ["Skovvej", "Engvej", "Birkevej", "Møllevej", "Kirkevej", "Strandvejen", "Åboulevarden",
-           "Søndergade", "Nørregade", "Vestergade", "Østerbrogade", "Lærkevej"]
-PLACES = [("8000", "Aarhus C", "0751"), ("5000", "Odense C", "0461"), ("9000", "Aalborg", "0851"),
-          ("2100", "København Ø", "0101"), ("6700", "Esbjerg", "0561"), ("7100", "Vejle", "0630"),
-          ("4000", "Roskilde", "0265"), ("8600", "Silkeborg", "0740")]
-CASE_TYPES = [("BYG", "Byggesag", "Teknik og Miljø"), ("BOL", "Boligstøtte", "Borgerservice"),
-              ("DAG", "Dagtilbud", "Børn og Unge"), ("PAS", "Pas og kørekort", "Borgerservice"),
-              ("HJM", "Hjælpemidler", "Sundhed og Omsorg"), ("SKA", "Skat og opkrævning", "Økonomi")]
+FIRST_NAMES = [
+    "Anne",
+    "Peter",
+    "Mette",
+    "Lars",
+    "Sofie",
+    "Jens",
+    "Freja",
+    "Mads",
+    "Ida",
+    "Søren",
+    "Emma",
+    "Niels",
+    "Karen",
+    "Rasmus",
+    "Lærke",
+    "Henrik",
+    "Astrid",
+    "Mikkel",
+    "Signe",
+    "Åge",
+]
+LAST_NAMES = [
+    "Jensen",
+    "Nielsen",
+    "Hansen",
+    "Pedersen",
+    "Andersen",
+    "Christensen",
+    "Larsen",
+    "Sørensen",
+    "Rasmussen",
+    "Jørgensen",
+    "Petersen",
+    "Madsen",
+    "Kristensen",
+    "Olsen",
+    "Thomsen",
+]
+STREETS = [
+    "Skovvej",
+    "Engvej",
+    "Birkevej",
+    "Møllevej",
+    "Kirkevej",
+    "Strandvejen",
+    "Åboulevarden",
+    "Søndergade",
+    "Nørregade",
+    "Vestergade",
+    "Østerbrogade",
+    "Lærkevej",
+]
+PLACES = [
+    ("8000", "Aarhus C", "0751"),
+    ("5000", "Odense C", "0461"),
+    ("9000", "Aalborg", "0851"),
+    ("2100", "København Ø", "0101"),
+    ("6700", "Esbjerg", "0561"),
+    ("7100", "Vejle", "0630"),
+    ("4000", "Roskilde", "0265"),
+    ("8600", "Silkeborg", "0740"),
+]
+CASE_TYPES = [
+    ("BYG", "Byggesag", "Teknik og Miljø"),
+    ("BOL", "Boligstøtte", "Borgerservice"),
+    ("DAG", "Dagtilbud", "Børn og Unge"),
+    ("PAS", "Pas og kørekort", "Borgerservice"),
+    ("HJM", "Hjælpemidler", "Sundhed og Omsorg"),
+    ("SKA", "Skat og opkrævning", "Økonomi"),
+]
 NEW_CASE_TYPE = ("FLY", "Flytteanmeldelse", "Borgerservice")
 BASE_DATE = date(2026, 1, 5)
 
@@ -89,19 +148,30 @@ def _cpr(rng: random.Random, used: set[str]) -> tuple[str, str]:
 
 
 def _ts(day: date, rng: random.Random) -> str:
-    return datetime(day.year, day.month, day.day, rng.randrange(6, 20), rng.randrange(60), rng.randrange(60)).isoformat() + "Z"
+    return (
+        datetime(day.year, day.month, day.day, rng.randrange(6, 20), rng.randrange(60), rng.randrange(60)).isoformat()
+        + "Z"
+    )
 
 
 def _new_citizen(rng: random.Random, world: World, day: date) -> Citizen:
     cpr, birth = _cpr(rng, set(world.citizens))
     first, last = rng.choice(FIRST_NAMES), rng.choice(LAST_NAMES)
     postal, city, muni = rng.choice(PLACES)
-    ascii_name = (f"{first}.{last}".lower().replace("ø", "oe").replace("æ", "ae").replace("å", "aa"))
+    ascii_name = f"{first}.{last}".lower().replace("ø", "oe").replace("æ", "ae").replace("å", "aa")
     return Citizen(
-        cpr=cpr, first_name=first, last_name=last, street=rng.choice(STREETS),
-        house_no=str(rng.randrange(1, 180)), postal_code=postal, city=city, municipality_code=muni,
+        cpr=cpr,
+        first_name=first,
+        last_name=last,
+        street=rng.choice(STREETS),
+        house_no=str(rng.randrange(1, 180)),
+        postal_code=postal,
+        city=city,
+        municipality_code=muni,
         email=f"{ascii_name}{rng.randrange(10, 99)}@borger.example",
-        phone=f"+45 00{rng.randrange(0, 1000000):06d}", birth_date=birth, updated_at=_ts(day, rng),
+        phone=f"+45 00{rng.randrange(0, 1000000):06d}",
+        birth_date=birth,
+        updated_at=_ts(day, rng),
     )
 
 
@@ -111,8 +181,13 @@ def _citizen_record(c: Citizen) -> dict:
     return {
         "cpr": c.cpr,
         "name": {"first": c.first_name, "last": c.last_name},
-        "address": {"street": c.street, "house_no": c.house_no, "postal_code": c.postal_code,
-                    "city": c.city, "municipality_code": c.municipality_code},
+        "address": {
+            "street": c.street,
+            "house_no": c.house_no,
+            "postal_code": c.postal_code,
+            "city": c.city,
+            "municipality_code": c.municipality_code,
+        },
         "contact": {"email": c.email, "phone": c.phone},
         "birth_date": c.birth_date,
         "deleted": False,
@@ -123,9 +198,14 @@ def _citizen_record(c: Citizen) -> dict:
 def _new_case(rng: random.Random, world: World, cpr: str, day: date, types: list[tuple]) -> dict:
     world.case_seq += 1
     case = {
-        "id": f"S-{day.year}-{world.case_seq:06d}", "cpr": cpr, "type": rng.choice(types)[0],
-        "status": "open", "opened": day.isoformat(), "closed": None,
-        "caseworker": f"kw{rng.randrange(1, 9):02d}", "updated_at": _ts(day, rng),
+        "id": f"S-{day.year}-{world.case_seq:06d}",
+        "cpr": cpr,
+        "type": rng.choice(types)[0],
+        "status": "open",
+        "opened": day.isoformat(),
+        "closed": None,
+        "caseworker": f"kw{rng.randrange(1, 9):02d}",
+        "updated_at": _ts(day, rng),
     }
     world.cases[case["id"]] = case
     return dict(case)
@@ -135,11 +215,15 @@ def _payment(rng: random.Random, world: World, case: dict, pay_day: date, booked
     world.payment_seq += 1
     amount = rng.choice([-1, 1, 1, 1]) * rng.randrange(5000, 2500000) / 100
     return {
-        "payment_id": f"P{world.payment_seq:08d}", "case_id": case["id"], "cpr": case["cpr"],
+        "payment_id": f"P{world.payment_seq:08d}",
+        "case_id": case["id"],
+        "cpr": case["cpr"],
         # Danish formats on purpose: decimal comma with thousand separator, dd-mm-yyyy
         "amount": f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
-        "currency": "DKK", "payment_date": pay_day.strftime("%d-%m-%Y"),
-        "booked_at": _ts(booked_day, rng).replace("T", " ").rstrip("Z"), "status": "booked",
+        "currency": "DKK",
+        "payment_date": pay_day.strftime("%d-%m-%Y"),
+        "booked_at": _ts(booked_day, rng).replace("T", " ").rstrip("Z"),
+        "status": "booked",
     }
 
 
@@ -226,10 +310,16 @@ def simulate(seed: int, sequence: int, citizens: int = 200) -> Batch:
 
 # --- native renderings -------------------------------------------------------------------------
 
+
 def citizens_json(batch: Batch) -> bytes:
     doc = {
-        "meta": {"system": "borgerportal", "api_version": "v2", "batch": batch.sequence,
-                 "business_date": batch.business_date.isoformat(), "count": len(batch.citizens)},
+        "meta": {
+            "system": "borgerportal",
+            "api_version": "v2",
+            "batch": batch.sequence,
+            "business_date": batch.business_date.isoformat(),
+            "count": len(batch.citizens),
+        },
         "data": batch.citizens,
     }
     return json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8")

@@ -82,6 +82,7 @@ class S3Settings:
             client_kwargs=client_kwargs,
             config_kwargs={"s3": {"addressing_style": "path"}},
             skip_instance_cache=True,
+            use_listings_cache=False,  # other writers (dlt, Trino, erasure) change the bucket concurrently
         )
 
 

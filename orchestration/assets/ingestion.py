@@ -8,7 +8,6 @@ Per source two multi-assets (one dlt run each, one output per entity):
 The raw asset keys equal the keys of the dbt sources, which connects the lineage to dbt.
 """
 
-
 import os
 
 import dagster as dg
@@ -59,8 +58,12 @@ def build_source_assets(source: SourceSpec) -> list[dg.AssetsDefinition]:
         for entity, stats in result.summary()["entities"].items():
             yield dg.MaterializeResult(
                 asset_key=landing_key(source.name, entity),
-                metadata={"load_id": result.load_id, "files": stats["files"], "bytes": stats["bytes"],
-                          "records": stats["records"]},
+                metadata={
+                    "load_id": result.load_id,
+                    "files": stats["files"],
+                    "bytes": stats["bytes"],
+                    "records": stats["records"],
+                },
             )
 
     @dg.multi_asset(

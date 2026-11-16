@@ -2,7 +2,6 @@
 environment variables at execution time (see docs/platform-contract.md), so the code location
 loads without any service being reachable."""
 
-
 import os
 from pathlib import Path
 

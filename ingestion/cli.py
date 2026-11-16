@@ -14,8 +14,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lakehouse-ingest", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="list configured sources")
-    for name, text in (("land", "stage 1: land native files"), ("index", "stage 2: index landed loads"),
-                       ("run", "land then index")):
+    for name, text in (
+        ("land", "stage 1: land native files"),
+        ("index", "stage 2: index landed loads"),
+        ("run", "land then index"),
+    ):
         p = sub.add_parser(name, help=text)
         p.add_argument("source")
         if name != "index":

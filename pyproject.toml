@@ -29,7 +29,6 @@ lakehouse-pii = "governance.classification.cli:main"
 dev = [
     "pytest==9.2.0",
     "ruff==0.17.5",
-    "sqlfluff==4.5.0",
     "dagster-webserver==1.13.30",
 ]
 
@@ -41,7 +40,7 @@ build-backend = "hatchling.build"
 packages = ["lakehouse", "ingestion", "governance", "orchestration"]
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py313"
 extend-exclude = ["transform/target", "transform/dbt_packages"]
 

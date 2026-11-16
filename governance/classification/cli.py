@@ -33,10 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=["check", "generate"])
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--live", action="store_true",
-                        help="check: also compare with the columns that exist in Trino")
-    parser.add_argument("--no-drift-check", action="store_true",
-                        help="check: do not compare the committed OPA data file with the manifest")
+    parser.add_argument("--live", action="store_true", help="check: also compare with the columns that exist in Trino")
+    parser.add_argument(
+        "--no-drift-check",
+        action="store_true",
+        help="check: do not compare the committed OPA data file with the manifest",
+    )
     args = parser.parse_args(argv)
 
     tables = m.tables_from_manifest(m.load_manifest(args.manifest))

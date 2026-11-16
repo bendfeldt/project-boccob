@@ -27,8 +27,14 @@ def fqn(catalog: str, schema: str, table: str) -> str:
 
 
 class TrinoClient:
-    def __init__(self, settings: TrinoSettings | None = None, *, user: str | None = None,
-                 session_properties: dict[str, str] | None = None, source: str = "boccob-solution"):
+    def __init__(
+        self,
+        settings: TrinoSettings | None = None,
+        *,
+        user: str | None = None,
+        session_properties: dict[str, str] | None = None,
+        source: str = "boccob-solution",
+    ):
         self.settings = settings or TrinoSettings.from_env()
         auth = None
         if self.settings.jwt_token:

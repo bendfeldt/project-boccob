@@ -19,19 +19,24 @@ from governance.erasure.executor import erase_subject
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="lakehouse-erase", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        prog="lakehouse-erase", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--identifier-type", default="cpr")
     parser.add_argument("--identifier-stdin", action="store_true", help="read the identifier from stdin")
     parser.add_argument("--subject-key", help="pseudonymised key instead of an identifier")
     parser.add_argument("--requested-by", help="who approved the erasure (e.g. the DPO)")
     parser.add_argument("--reason", help="case / ticket reference")
     parser.add_argument("--dry-run", action="store_true", help="only report what would be erased")
-    parser.add_argument("--submit", action="store_true",
-                        help="queue the request for the scheduled Dagster erasure job instead of executing now")
+    parser.add_argument(
+        "--submit",
+        action="store_true",
+        help="queue the request for the scheduled Dagster erasure job instead of executing now",
+    )
     parser.add_argument("--process-pending", action="store_true", help="execute all queued requests")
-    parser.add_argument("--verify-storage", action="store_true",
-                        help="after purging, scan the object store for remains (slow)")
+    parser.add_argument(
+        "--verify-storage", action="store_true", help="after purging, scan the object store for remains (slow)"
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -53,13 +58,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.submit:
         from governance.erasure.executor import submit_request
 
-        request_id = submit_request(identifier=identifier, identifier_type=args.identifier_type,
-                                    subject_key=args.subject_key, requested_by=args.requested_by, reason=args.reason)
+        request_id = submit_request(
+            identifier=identifier,
+            identifier_type=args.identifier_type,
+            subject_key=args.subject_key,
+            requested_by=args.requested_by,
+            reason=args.reason,
+        )
         print(json.dumps({"request_id": request_id, "status": "queued"}))
         return 0
-    report = erase_subject(identifier=identifier, identifier_type=args.identifier_type, subject_key=args.subject_key,
-                           requested_by=args.requested_by, reason=args.reason, dry_run=args.dry_run,
-                           verify_storage=args.verify_storage)
+    report = erase_subject(
+        identifier=identifier,
+        identifier_type=args.identifier_type,
+        subject_key=args.subject_key,
+        requested_by=args.requested_by,
+        reason=args.reason,
+        dry_run=args.dry_run,
+        verify_storage=args.verify_storage,
+    )
     json.dump(report.as_dict(), sys.stdout, indent=2, default=str)
     print()
     return 0 if report.status in ("completed", "planned") else 1

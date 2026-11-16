@@ -3,7 +3,6 @@
 dbt data tests become Dagster asset checks; dbt meta (owner, layer, PII) becomes asset metadata.
 """
 
-
 from collections.abc import Mapping
 from typing import Any
 

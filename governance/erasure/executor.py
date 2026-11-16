@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -95,9 +96,21 @@ def _baseline_tables(trino: TrinoClient) -> list[str]:
     return [f"{catalog}.{KEYSTORE_SCHEMA}.{r[0]}" for r in rows if r[0].endswith("__baseline")]
 
 
-def erase_subject(*, identifier: str | None = None, identifier_type: str = "cpr", subject_key: str | None = None,
-                  requested_by: str, reason: str, dry_run: bool = False, verify_storage: bool = False,
-                  trino: TrinoClient | None = None, s3: S3Settings | None = None) -> ErasureReport:
+def erase_subject(
+    *,
+    identifier: str | None = None,
+    identifier_type: str = "cpr",
+    subject_key: str | None = None,
+    requested_by: str,
+    reason: str,
+    dry_run: bool = False,
+    verify_storage: bool = False,
+    trino: TrinoClient | None = None,
+    s3: S3Settings | None = None,
+    before_verify: Callable[[], None] | None = None,
+) -> ErasureReport:
+    """Erase one data subject. ``before_verify`` runs after the purge and before verification
+    (the request queue uses it to remove its own copy of the subject key)."""
     if bool(identifier) == bool(subject_key):
         raise ValueError("give exactly one of identifier / subject_key")
     pepper = pseudonym_pepper()
@@ -106,7 +119,9 @@ def erase_subject(*, identifier: str | None = None, identifier_type: str = "cpr"
     report = ErasureReport(erasure_id=str(uuid.uuid4()), subject_digest=audit_digest(key, pepper), dry_run=dry_run)
 
     catalogs = [catalog_of(layer) for layer in LAYERS]
-    trino = trino or TrinoClient(session_properties=iceberg.retention_session(catalogs, "0s"), source="lakehouse-erasure")
+    trino = trino or TrinoClient(
+        session_properties=iceberg.retention_session(catalogs, "0s"), source="lakehouse-erasure"
+    )
     s3 = s3 or S3Settings.from_env()
     fs = s3.filesystem()
     tables = cm.tables_from_manifest(cm.load_manifest(manifest_path()))
@@ -135,25 +150,32 @@ def erase_subject(*, identifier: str | None = None, identifier_type: str = "cpr"
 
         for path in report.raw_files:
             delete_permanently(fs, s3.raw_bucket, path)
-            tombstone = {"erased_at": datetime.now(UTC).isoformat(), "erasure_id": report.erasure_id,
-                         "reason": "GDPR art. 17 erasure; records of other data subjects remain in the raw index"}
+            tombstone = {
+                "erased_at": datetime.now(UTC).isoformat(),
+                "erasure_id": report.erasure_id,
+                "reason": "GDPR art. 17 erasure; records of other data subjects remain in the raw index",
+            }
             fs.pipe_file(f"{s3.raw_bucket}/{path}{TOMBSTONE_SUFFIX}", json.dumps(tombstone).encode())
 
         for name in sorted(existing | set(baselines)):
             iceberg.purge_history(trino, iceberg.TableRef(*name.split(".")))
             report.purged_tables.append(name)
 
+        if before_verify:
+            before_verify()
         for step in steps:
             left = int(trino.scalar(step.verify_sql) or 0)
             if left:
                 report.remaining[f"{step.table} [{step.action}]"] = left
         if verify_storage:
             needles = [key] + ([identifier] if identifier else [])
-            report.storage_hits = scan_storage(fs, [f"lakehouse-{layer}" if layer != "raw" else s3.raw_bucket
-                                                    for layer in LAYERS], needles)
+            report.storage_hits = scan_storage(
+                fs, [f"lakehouse-{layer}" if layer != "raw" else s3.raw_bucket for layer in LAYERS], needles
+            )
         if report.remaining or report.storage_hits:
             raise ErasureVerificationError(
-                f"subject still present: tables={report.remaining} objects={report.storage_hits[:5]}")
+                f"subject still present: tables={report.remaining} objects={report.storage_hits[:5]}"
+            )
         report.status = "completed"
     except Exception as exc:
         report.status = "failed"
@@ -163,8 +185,17 @@ def erase_subject(*, identifier: str | None = None, identifier_type: str = "cpr"
         details = {k: v for k, v in report.as_dict().items() if k not in ("erasure_id", "subject_digest", "status")}
         trino.execute(
             f"insert into {audit_table} values (?, ?, ?, ?, ?, ?, ?, ?, current_user, ?)",
-            [report.erasure_id, report.subject_digest, identifier_type if identifier else "subject_key",
-             requested_by, reason, report.status, started, datetime.now(UTC), json.dumps(details, default=str)],
+            [
+                report.erasure_id,
+                report.subject_digest,
+                identifier_type if identifier else "subject_key",
+                requested_by,
+                reason,
+                report.status,
+                started,
+                datetime.now(UTC),
+                json.dumps(details, default=str),
+            ],
         )
         log.info("erasure %s %s: %s", report.erasure_id, report.status, json.dumps(details, default=str))
     return report
@@ -174,6 +205,7 @@ def erase_subject(*, identifier: str | None = None, identifier_type: str = "cpr"
 # The orchestrator must never see an identifier in run configuration or logs. The DPO tooling
 # therefore *submits* a request (only the pseudonymised key is stored, in a restricted schema)
 # and the scheduled erasure job processes whatever is pending and removes the request again.
+
 
 def _ensure_request_table(trino: TrinoClient) -> str:
     catalog = catalog_of("curated")
@@ -188,31 +220,55 @@ def _ensure_request_table(trino: TrinoClient) -> str:
     return table
 
 
-def submit_request(*, identifier: str | None = None, identifier_type: str = "cpr", subject_key: str | None = None,
-                   requested_by: str, reason: str, trino: TrinoClient | None = None) -> str:
+def submit_request(
+    *,
+    identifier: str | None = None,
+    identifier_type: str = "cpr",
+    subject_key: str | None = None,
+    requested_by: str,
+    reason: str,
+    trino: TrinoClient | None = None,
+) -> str:
     if bool(identifier) == bool(subject_key):
         raise ValueError("give exactly one of identifier / subject_key")
     key = validate_subject_key(subject_key or pseudonymise(identifier, pseudonym_pepper()))
     trino = trino or TrinoClient(source="lakehouse-erasure")
     table = _ensure_request_table(trino)
     request_id = str(uuid.uuid4())
-    trino.execute(f"insert into {table} values (?, ?, ?, ?, ?, current_timestamp)",
-                  [request_id, key, identifier_type if identifier else "subject_key", requested_by, reason])
+    trino.execute(
+        f"insert into {table} values (?, ?, ?, ?, ?, current_timestamp)",
+        [request_id, key, identifier_type if identifier else "subject_key", requested_by, reason],
+    )
     return request_id
 
 
-def process_pending_requests(*, verify_storage: bool = False, trino: TrinoClient | None = None,
-                             s3: S3Settings | None = None) -> list[ErasureReport]:
+def process_pending_requests(
+    *, verify_storage: bool = False, trino: TrinoClient | None = None, s3: S3Settings | None = None
+) -> list[ErasureReport]:
     catalogs = [catalog_of(layer) for layer in LAYERS]
-    trino = trino or TrinoClient(session_properties=iceberg.retention_session(catalogs, "0s"), source="lakehouse-erasure")
+    trino = trino or TrinoClient(
+        session_properties=iceberg.retention_session(catalogs, "0s"), source="lakehouse-erasure"
+    )
     table = _ensure_request_table(trino)
     pending = trino.execute(f"select request_id, subject_key, requested_by, reason from {table} order by requested_at")
+    queue = iceberg.TableRef(catalog_of("curated"), AUDIT_SCHEMA, REQUEST_TABLE)
     reports = []
     for request_id, key, requested_by, reason in pending:
-        report = erase_subject(subject_key=key, requested_by=requested_by, reason=f"{reason} (request {request_id})",
-                               verify_storage=verify_storage, trino=trino, s3=s3)
-        trino.execute(f"delete from {table} where request_id = ?", [request_id])
-        reports.append(report)
-    if pending:
-        iceberg.purge_history(trino, iceberg.TableRef(catalog_of("curated"), AUDIT_SCHEMA, REQUEST_TABLE))
+
+        def dequeue(request_id: str = request_id) -> None:
+            # the queue row holds the subject key: it has to be gone before storage is verified
+            trino.execute(f"delete from {table} where request_id = ?", [request_id])
+            iceberg.purge_history(trino, queue)
+
+        reports.append(
+            erase_subject(
+                subject_key=key,
+                requested_by=requested_by,
+                reason=f"{reason} (request {request_id})",
+                verify_storage=verify_storage,
+                trino=trino,
+                s3=s3,
+                before_verify=dequeue,
+            )
+        )
     return reports

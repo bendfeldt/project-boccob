@@ -24,16 +24,22 @@ class MaintenanceReport:
         return not self.failed
 
 
-def run_maintenance(layers: tuple[str, ...] = LAYERS, operations: tuple[str, ...] = OPERATIONS,
-                    schema: str | None = None, config: RetentionConfig | None = None,
-                    trino: TrinoClient | None = None) -> MaintenanceReport:
+def run_maintenance(
+    layers: tuple[str, ...] = LAYERS,
+    operations: tuple[str, ...] = OPERATIONS,
+    schema: str | None = None,
+    config: RetentionConfig | None = None,
+    trino: TrinoClient | None = None,
+) -> MaintenanceReport:
     config = config or load_retention()
     unknown = set(operations) - set(OPERATIONS)
     if unknown:
         raise ValueError(f"unknown maintenance operations: {sorted(unknown)}")
     catalogs = [catalog_of(layer) for layer in layers]
     # floor lowered to 1h: retention thresholds below Trino's 7d default are a deliberate policy choice
-    trino = trino or TrinoClient(session_properties=iceberg.retention_session(catalogs, "1h"), source="lakehouse-maintenance")
+    trino = trino or TrinoClient(
+        session_properties=iceberg.retention_session(catalogs, "1h"), source="lakehouse-maintenance"
+    )
     report = MaintenanceReport()
     for layer in layers:
         policy = config.layers[layer]
