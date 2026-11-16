@@ -41,20 +41,45 @@
   {% endcall %}
   {% call statement('keystore_unknown') %}
     insert into {{ ks }}
-    select -1, '__unknown__', '', 'unknown', current_timestamp, '{{ invocation_id }}', null, null, null
+    select -1, '__unknown__', '', 'unknown', current_timestamp, '{{ invocation_id }}:{{ dimension }}:unknown', null, null, null
     where not exists (select 1 from {{ ks }} where surrogate_key = -1)
   {% endcall %}
+  {# two sessions creating the keystore at the same moment both insert the unknown member:
+     every session applies the same deterministic rule, so exactly one row survives #}
+  {% set unknown_count = run_query("select count(*) from " ~ ks ~ " where surrogate_key = -1").columns[0].values()[0] | int %}
+  {% if unknown_count > 1 %}
+    {% call statement('keystore_unknown_dedupe') %}
+      delete from {{ ks }}
+      where surrogate_key = -1
+        and key_created_by <> (select min(key_created_by) from {{ ks }} where surrogate_key = -1)
+    {% endcall %}
+  {% endif %}
   {{ return(ks) }}
 {% endmacro %}
 
-{# Number of integrity violations: duplicate surrogate keys or duplicate (business key, version). #}
-{% macro keystore_violations(ks) %}
+{# Collisions caused by one allocation attempt: keys or (business key, version) pairs that the
+   rows of this attempt share with rows written by anybody else. #}
+{% macro keystore_collisions(ks, allocation_id) %}
   {% set q %}
     select
-      (select count(*) from (select surrogate_key from {{ ks }} group by 1 having count(*) > 1))
-      + (select count(*) from (select business_key, version_key from {{ ks }} group by 1, 2 having count(*) > 1))
+      (select count(*) from {{ ks }} mine join {{ ks }} other
+         on other.surrogate_key = mine.surrogate_key and other.key_created_by <> mine.key_created_by
+       where mine.key_created_by = '{{ allocation_id }}')
+      + (select count(*) from {{ ks }} mine join {{ ks }} other
+           on other.business_key = mine.business_key and other.version_key = mine.version_key
+          and other.key_created_by <> mine.key_created_by
+         where mine.key_created_by = '{{ allocation_id }}')
   {% endset %}
   {{ return(run_query(q).columns[0].values()[0] | int) }}
+{% endmacro %}
+
+{# Neither Trino nor dbt's Jinja can sleep. A throw-away query of random size spreads colliding
+   writers apart before they retry (randomised backoff). #}
+{% macro keystore_backoff(attempt) %}
+  {# roughly 0.25 s per unit on a small cluster: up to ~1 s after the first collision, ~5 s after the fifth #}
+  {% set units = range(1, 4 * attempt + 1) | random %}
+  {% do run_query("select count(*) from unnest(sequence(1, 10000)) a (x) cross join unnest(sequence(1, 1000)) b (y) "
+                  ~ "cross join unnest(sequence(1, " ~ units ~ ")) c (z) where (x + y) % 7 = z") %}
 {% endmacro %}
 
 {#
@@ -64,9 +89,9 @@
   member_type:    'regular' (dimension load) or 'inferred' (fact load found an unknown member).
 
   Optimistic, verified allocation: one INSERT computes max(surrogate_key) + row_number() for the
-  missing candidates (a single atomic Iceberg commit). Afterwards integrity is verified; if a
+  missing candidates (a single atomic Iceberg commit). Afterwards the attempt is verified; if a
   concurrent writer produced a collision the rows of *this* attempt are removed and the allocation
-  is retried. Keys that existed before the attempt are never touched.
+  is retried after a random backoff. Keys that existed before the attempt are never touched.
 #}
 {% macro keystore_allocate(dimension, candidates_sql, member_type='regular') %}
   {% set ks = keystore_ensure(dimension) %}
@@ -113,13 +138,14 @@
           {% endif %}
       )
     {% endcall %}
-    {% if keystore_violations(ks) == 0 %}
+    {% if keystore_collisions(ks, allocation_id) == 0 %}
       {% set ns.done = true %}
     {% else %}
-      {{ log("keystore " ~ ks ~ ": collision detected on attempt " ~ attempt ~ ", rolling back own allocation", info=true) }}
+      {{ log("keystore " ~ ks ~ ": collision detected on attempt " ~ attempt ~ ", withdrawing own allocation", info=true) }}
       {% call statement('keystore_rollback') %}
         delete from {{ ks }} where key_created_by = '{{ allocation_id }}'
       {% endcall %}
+      {% do keystore_backoff(attempt) %}
     {% endif %}
   {% endfor %}
   {% if not ns.done %}

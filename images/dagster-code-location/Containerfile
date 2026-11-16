@@ -51,7 +51,10 @@ LABEL org.opencontainers.image.title="boccob-dagster-code-location" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-RUN groupadd --gid 10001 lakehouse \
+# pip is not needed at runtime (dependencies come from the locked venv) and ships vendored
+# libraries that show up in vulnerability scans
+RUN python -m pip uninstall --yes --quiet pip \
+    && groupadd --gid 10001 lakehouse \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin lakehouse
 
 COPY --from=build /opt/venv /opt/venv

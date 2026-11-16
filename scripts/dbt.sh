@@ -5,8 +5,10 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_env
-if [[ "${1:-}" == "parse" ]]; then
-  export TRINO_HOST="${TRINO_HOST:-parse-only}" TRINO_USER="${TRINO_USER:-parse-only}"
-fi
+for arg in "$@"; do
+  if [[ "$arg" == "parse" ]]; then
+    export TRINO_HOST="${TRINO_HOST:-parse-only}" TRINO_USER="${TRINO_USER:-parse-only}"
+  fi
+done
 cd "$ROOT"
 exec uv run dbt "$@"

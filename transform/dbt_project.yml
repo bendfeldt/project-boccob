@@ -15,7 +15,7 @@ vars:
   # CONSOLIDATED_CATALOG, CURATED_CATALOG (defaults: raw, clean, consolidated, curated)
   keystore_schema: keystore
   keystore_key_type: bigint          # sequential integer surrogate keys (64 bit)
-  keystore_max_attempts: 3           # optimistic allocation retries, see docs/keystore.md
+  keystore_max_attempts: 5           # optimistic allocation retries, see docs/keystore.md
   scd_default_type: 2                # dimensions are SCD2 unless a model sets scd_type: 1
   scd_begin_of_time: "timestamp '1900-01-01 00:00:00.000000 UTC'"
   scd_end_of_time: "timestamp '9999-12-31 00:00:00.000000 UTC'"
