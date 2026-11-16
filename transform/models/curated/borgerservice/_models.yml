@@ -13,7 +13,7 @@ models:
       group: borgerservice
       meta:
         owner: team-borgerservice
-        gdpr: {subject_column: person_id, erasure: keystore, retention_days: 1825}
+        gdpr: {subject_column: person_id, erasure: keystore}
     data_tests:
       - keystore_integrity
       - keystore_stable_since_baseline
@@ -145,7 +145,9 @@ models:
           subject_dimension: dim_citizen
           subject_key_column: citizen_key
           erasure: anonymise          # keep the booking, cut the link to the person (bookkeeping duty)
+          anonymise_columns: [case_id]
           retention_days: 1825
+          retention_column: booked_at
     columns:
       - name: payment_id
         description: Payment number (degenerate dimension)

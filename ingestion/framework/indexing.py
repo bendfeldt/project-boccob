@@ -54,6 +54,7 @@ INDEX_SCHEMA = pa.schema(
     ]
 )
 BATCH_ROWS = 50_000
+ERASED_SUFFIX = ".erased.json"  # tombstone written by governance.erasure
 
 
 class ChecksumMismatchError(RuntimeError):
@@ -152,7 +153,11 @@ def index_source(source: SourceSpec, *, load_id: str | None = None, reindex: boo
                 if mine:
                     _delete_load(catalog(), source, entity, lid)
                 for entry in mine:
-                    content = fs.cat_file(f"{s3.raw_bucket}/{entry.path}")
+                    target = f"{s3.raw_bucket}/{entry.path}"
+                    if not fs.exists(target) and fs.exists(target + ERASED_SUFFIX):
+                        log.warning("skipping %s: removed by a right-to-erasure request", entry.path)
+                        continue
+                    content = fs.cat_file(target)
                     for table in records_table(entry, entity, content, pepper, loaded_at):
                         result.rows[entity.name] = result.rows.get(entity.name, 0) + table.num_rows
                         yield table

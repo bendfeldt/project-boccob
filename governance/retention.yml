@@ -1,0 +1,22 @@
+# Retention policy per layer. Table level rules live next to the data definition:
+#   dbt model meta.gdpr.retention_days + meta.gdpr.retention_column
+# (a model without retention_column is kept until erased or deregistered - master data).
+layers:
+  raw:
+    landing_days: 30            # native files in s3://lakehouse-raw/<source>/<entity>/...
+    uncommitted_landing_days: 2 # files of aborted loads (no manifest)
+    index_days: 90              # rows of raw.<source>.<entity>
+    snapshot_retention: 3d      # Iceberg time travel window
+    orphan_file_retention: 3d
+  clean:
+    snapshot_retention: 7d
+    orphan_file_retention: 7d
+  consolidated:
+    snapshot_retention: 7d
+    orphan_file_retention: 7d
+  curated:
+    snapshot_retention: 14d
+    orphan_file_retention: 7d
+maintenance:
+  optimize_file_size_threshold: 64MB
+  exclude_schemas: [information_schema, system]

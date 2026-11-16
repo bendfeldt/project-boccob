@@ -10,7 +10,8 @@ models:
     config:
       meta:
         owner: team-borgerservice
-        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825}
+        # master data: kept while the person is registered (no time based rule), erased on request
+        gdpr: {subject_column: citizen_id, erasure: delete}
     data_tests:
       - unique_combination:
           arguments: {columns: [citizen_id, source_updated_at]}
@@ -98,7 +99,8 @@ models:
     config:
       meta:
         owner: team-borgerservice
-        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825}
+        # closed cases are deleted 5 years after closing; open cases have no closed_date and stay
+        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825, retention_column: closed_date}
     columns:
       - name: case_id
         description: Case number
@@ -167,7 +169,8 @@ models:
     config:
       meta:
         owner: team-oekonomi
-        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825}
+        # bookkeeping records: 5 years after the payment date
+        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825, retention_column: payment_date}
     columns:
       - name: payment_id
         description: Payment number

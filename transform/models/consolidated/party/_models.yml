@@ -8,7 +8,7 @@ models:
     config:
       meta:
         owner: team-data-governance
-        gdpr: {subject_column: person_id, erasure: delete, retention_days: 1825}
+        gdpr: {subject_column: person_id, erasure: delete}
     data_tests:
       - unique_combination:
           arguments: {columns: [person_id, valid_from]}
