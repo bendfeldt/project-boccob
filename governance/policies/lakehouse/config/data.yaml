@@ -1,0 +1,55 @@
+# Static access model consumed by the Trino policy (data.lakehouse.config).
+# Group names are the Keycloak groups of the architecture contract.
+admin_group: platform-admin
+pii_group: pii-reader            # members see classified columns unmasked
+pii_levels_masked: [direct, sensitive]
+
+# Everybody holding one of these groups may run queries at all.
+known_groups: [platform-admin, data-engineer, analyst, pii-reader, auditor]
+
+# Read-only observers of query history (system.runtime, other users' queries).
+query_observers: [platform-admin, auditor]
+
+# One Trino catalog per layer. read/write = groups; platform-admin is always allowed.
+# unclassified: how columns without a classification are treated for users without the pii group
+#   mask  -> NULL (classification is mandatory; unknown is treated as personal data)
+#   allow -> visible
+catalogs:
+  raw:
+    layer: raw
+    read: [data-engineer, auditor]
+    write: [data-engineer]
+    unclassified: allow
+    # the raw index is schema-on-read: the whole record and the subject keys are personal data
+    column_defaults:
+      payload: {pii: direct, mask: "null"}
+      _subject_keys: {pii: indirect}
+  clean:
+    layer: clean
+    read: [data-engineer, auditor]
+    write: [data-engineer]
+    unclassified: mask
+  consolidated:
+    layer: consolidated
+    read: [data-engineer, auditor]
+    write: [data-engineer]
+    unclassified: mask
+  curated:
+    layer: curated
+    read: [data-engineer, analyst, auditor]
+    write: [data-engineer]
+    unclassified: mask
+    schemas:                       # schema level overrides
+      keystore:
+        read: [data-engineer, auditor]
+        unclassified: allow
+      audit:
+        read: [data-engineer, auditor]
+        unclassified: allow
+      dbt_test_audit:
+        read: [data-engineer]
+        unclassified: allow
+
+# Optional static group membership for principals whose groups Trino cannot resolve itself
+# (e.g. service accounts). Empty by default; the platform may overlay it.
+principals: {}

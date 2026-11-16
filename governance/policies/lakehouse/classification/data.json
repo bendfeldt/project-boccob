@@ -1,0 +1,483 @@
+{
+  "generated_from": "dbt manifest (governance.classification)",
+  "tables": {
+    "clean.borgerportal.case_types": {
+      "columns": {
+        "_invocation_id": {
+          "pii": "none"
+        },
+        "_load_id": {
+          "pii": "none"
+        },
+        "_loaded_at": {
+          "pii": "none"
+        },
+        "_transformed_at": {
+          "pii": "none"
+        },
+        "case_type_code": {
+          "pii": "none"
+        },
+        "case_type_name": {
+          "pii": "none"
+        },
+        "department": {
+          "pii": "none"
+        },
+        "is_active": {
+          "pii": "none"
+        }
+      },
+      "layer": "clean"
+    },
+    "clean.borgerportal.cases": {
+      "columns": {
+        "_invocation_id": {
+          "pii": "none"
+        },
+        "_load_id": {
+          "pii": "none"
+        },
+        "_loaded_at": {
+          "pii": "none"
+        },
+        "_raw_file": {
+          "pii": "none"
+        },
+        "_raw_row": {
+          "pii": "none"
+        },
+        "_transformed_at": {
+          "pii": "none"
+        },
+        "case_id": {
+          "pii": "indirect"
+        },
+        "case_type_code": {
+          "pii": "none"
+        },
+        "caseworker_initials": {
+          "mask": "redact",
+          "pii": "indirect"
+        },
+        "citizen_id": {
+          "pii": "indirect",
+          "pseudonymised": true
+        },
+        "closed_date": {
+          "pii": "none"
+        },
+        "opened_date": {
+          "pii": "none"
+        },
+        "source_updated_at": {
+          "pii": "none"
+        },
+        "status": {
+          "pii": "none"
+        }
+      },
+      "layer": "clean"
+    },
+    "clean.borgerportal.citizens": {
+      "columns": {
+        "_invocation_id": {
+          "pii": "none"
+        },
+        "_load_id": {
+          "pii": "none"
+        },
+        "_loaded_at": {
+          "pii": "none"
+        },
+        "_raw_file": {
+          "pii": "none"
+        },
+        "_raw_row": {
+          "pii": "none"
+        },
+        "_transformed_at": {
+          "pii": "none"
+        },
+        "address_line": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "birth_date": {
+          "mask": "null",
+          "pii": "direct"
+        },
+        "citizen_id": {
+          "pii": "indirect",
+          "pseudonymised": true
+        },
+        "city": {
+          "pii": "indirect"
+        },
+        "cpr_number": {
+          "cpr": true,
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "email": {
+          "mask": "email",
+          "pii": "direct"
+        },
+        "first_name": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "full_name": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "house_no": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "is_deleted": {
+          "pii": "none"
+        },
+        "last_name": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "municipality_code": {
+          "pii": "indirect"
+        },
+        "phone": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "postal_code": {
+          "pii": "indirect"
+        },
+        "source_updated_at": {
+          "pii": "none"
+        },
+        "street": {
+          "mask": "redact",
+          "pii": "direct"
+        }
+      },
+      "layer": "clean"
+    },
+    "clean.borgerportal.payments": {
+      "columns": {
+        "_invocation_id": {
+          "pii": "none"
+        },
+        "_load_id": {
+          "pii": "none"
+        },
+        "_loaded_at": {
+          "pii": "none"
+        },
+        "_raw_file": {
+          "pii": "none"
+        },
+        "_raw_row": {
+          "pii": "none"
+        },
+        "_transformed_at": {
+          "pii": "none"
+        },
+        "amount": {
+          "pii": "indirect"
+        },
+        "booked_at": {
+          "pii": "none"
+        },
+        "case_id": {
+          "pii": "indirect"
+        },
+        "case_type_code": {
+          "pii": "none"
+        },
+        "citizen_id": {
+          "pii": "indirect",
+          "pseudonymised": true
+        },
+        "currency_code": {
+          "pii": "none"
+        },
+        "payment_date": {
+          "pii": "none"
+        },
+        "payment_id": {
+          "pii": "none"
+        },
+        "status": {
+          "pii": "none"
+        }
+      },
+      "layer": "clean"
+    },
+    "consolidated.party.person": {
+      "columns": {
+        "_invocation_id": {
+          "pii": "none"
+        },
+        "_source_loaded_at": {
+          "pii": "none"
+        },
+        "_transformed_at": {
+          "pii": "none"
+        },
+        "address_line": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "birth_date": {
+          "mask": "null",
+          "pii": "direct"
+        },
+        "email": {
+          "mask": "email",
+          "pii": "direct"
+        },
+        "family_name": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "full_name": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "given_name": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "is_deregistered": {
+          "pii": "none"
+        },
+        "municipality_code": {
+          "pii": "indirect"
+        },
+        "person_id": {
+          "pii": "indirect",
+          "pseudonymised": true
+        },
+        "phone": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "postal_code": {
+          "pii": "indirect"
+        },
+        "postal_district": {
+          "pii": "indirect"
+        },
+        "source_system": {
+          "pii": "none"
+        },
+        "valid_from": {
+          "pii": "none"
+        }
+      },
+      "layer": "consolidated"
+    },
+    "curated.borgerservice.dim_case_type": {
+      "columns": {
+        "case_type_code": {
+          "pii": "none"
+        },
+        "case_type_key": {
+          "pii": "none"
+        },
+        "case_type_name": {
+          "pii": "none"
+        },
+        "department": {
+          "pii": "none"
+        },
+        "is_active": {
+          "pii": "none"
+        },
+        "is_erased": {
+          "pii": "none"
+        },
+        "is_inferred": {
+          "pii": "none"
+        }
+      },
+      "layer": "curated"
+    },
+    "curated.borgerservice.dim_citizen": {
+      "columns": {
+        "birth_year": {
+          "pii": "indirect"
+        },
+        "citizen_key": {
+          "pii": "none"
+        },
+        "email": {
+          "mask": "email",
+          "pii": "direct"
+        },
+        "full_name": {
+          "mask": "redact",
+          "pii": "direct"
+        },
+        "is_current": {
+          "pii": "none"
+        },
+        "is_deregistered": {
+          "pii": "none"
+        },
+        "is_erased": {
+          "pii": "none"
+        },
+        "is_inferred": {
+          "pii": "none"
+        },
+        "municipality_code": {
+          "pii": "indirect"
+        },
+        "person_id": {
+          "pii": "indirect",
+          "pseudonymised": true
+        },
+        "postal_code": {
+          "pii": "indirect"
+        },
+        "postal_district": {
+          "pii": "indirect"
+        },
+        "valid_from": {
+          "pii": "none"
+        },
+        "valid_to": {
+          "pii": "none"
+        }
+      },
+      "layer": "curated"
+    },
+    "curated.borgerservice.dim_date": {
+      "columns": {
+        "calendar_date": {
+          "pii": "none"
+        },
+        "calendar_month": {
+          "pii": "none"
+        },
+        "calendar_quarter": {
+          "pii": "none"
+        },
+        "calendar_year": {
+          "pii": "none"
+        },
+        "date_key": {
+          "pii": "none"
+        },
+        "is_weekend": {
+          "pii": "none"
+        },
+        "iso_day_of_week": {
+          "pii": "none"
+        },
+        "iso_week": {
+          "pii": "none"
+        },
+        "year_month": {
+          "pii": "none"
+        }
+      },
+      "layer": "curated"
+    },
+    "curated.borgerservice.dp_payment_summary_v1": {
+      "columns": {
+        "case_type_code": {
+          "pii": "none"
+        },
+        "case_type_name": {
+          "pii": "none"
+        },
+        "citizen_count": {
+          "pii": "none"
+        },
+        "is_small_cell": {
+          "pii": "none"
+        },
+        "municipality_code": {
+          "pii": "none"
+        },
+        "payment_count": {
+          "pii": "none"
+        },
+        "total_amount": {
+          "pii": "none"
+        },
+        "year_month": {
+          "pii": "none"
+        }
+      },
+      "layer": "curated",
+      "row_filter": {
+        "exempt_groups": [
+          "data-engineer",
+          "pii-reader",
+          "platform-admin"
+        ],
+        "expression": "is_small_cell = false"
+      }
+    },
+    "curated.borgerservice.fact_payment": {
+      "columns": {
+        "_invocation_id": {
+          "pii": "none"
+        },
+        "_source_loaded_at": {
+          "pii": "none"
+        },
+        "_transformed_at": {
+          "pii": "none"
+        },
+        "amount": {
+          "pii": "indirect"
+        },
+        "booked_at": {
+          "pii": "none"
+        },
+        "case_id": {
+          "pii": "indirect"
+        },
+        "case_type_key": {
+          "pii": "none"
+        },
+        "citizen_key": {
+          "pii": "none"
+        },
+        "currency_code": {
+          "pii": "none"
+        },
+        "payment_date_key": {
+          "pii": "none"
+        },
+        "payment_id": {
+          "pii": "none"
+        },
+        "status": {
+          "pii": "none"
+        }
+      },
+      "layer": "curated"
+    },
+    "raw.borgerportal.case_types": {
+      "columns": {},
+      "layer": "raw"
+    },
+    "raw.borgerportal.cases": {
+      "columns": {},
+      "layer": "raw"
+    },
+    "raw.borgerportal.citizens": {
+      "columns": {},
+      "layer": "raw"
+    },
+    "raw.borgerportal.payments": {
+      "columns": {},
+      "layer": "raw"
+    }
+  }
+}
