@@ -38,6 +38,7 @@ from lakehouse.trino_client import TrinoClient, fqn
 log = logging.getLogger(__name__)
 AUDIT_SCHEMA = "audit"
 AUDIT_TABLE = "erasure_log"
+REQUEST_TABLE = "erasure_requests"
 TOMBSTONE_SUFFIX = ".erased.json"
 
 
@@ -167,3 +168,51 @@ def erase_subject(*, identifier: str | None = None, identifier_type: str = "cpr"
         )
         log.info("erasure %s %s: %s", report.erasure_id, report.status, json.dumps(details, default=str))
     return report
+
+
+# --- request queue ---------------------------------------------------------------------------
+# The orchestrator must never see an identifier in run configuration or logs. The DPO tooling
+# therefore *submits* a request (only the pseudonymised key is stored, in a restricted schema)
+# and the scheduled erasure job processes whatever is pending and removes the request again.
+
+def _ensure_request_table(trino: TrinoClient) -> str:
+    catalog = catalog_of("curated")
+    trino.execute(f'create schema if not exists "{catalog}"."{AUDIT_SCHEMA}"')
+    table = fqn(catalog, AUDIT_SCHEMA, REQUEST_TABLE)
+    trino.execute(
+        f"""create table if not exists {table} (
+            request_id varchar, subject_key varchar, identifier_type varchar, requested_by varchar,
+            reason varchar, requested_at timestamp(6) with time zone)
+            comment 'Pending right-to-erasure requests; rows are removed and purged once executed'"""
+    )
+    return table
+
+
+def submit_request(*, identifier: str | None = None, identifier_type: str = "cpr", subject_key: str | None = None,
+                   requested_by: str, reason: str, trino: TrinoClient | None = None) -> str:
+    if bool(identifier) == bool(subject_key):
+        raise ValueError("give exactly one of identifier / subject_key")
+    key = validate_subject_key(subject_key or pseudonymise(identifier, pseudonym_pepper()))
+    trino = trino or TrinoClient(source="lakehouse-erasure")
+    table = _ensure_request_table(trino)
+    request_id = str(uuid.uuid4())
+    trino.execute(f"insert into {table} values (?, ?, ?, ?, ?, current_timestamp)",
+                  [request_id, key, identifier_type if identifier else "subject_key", requested_by, reason])
+    return request_id
+
+
+def process_pending_requests(*, verify_storage: bool = False, trino: TrinoClient | None = None,
+                             s3: S3Settings | None = None) -> list[ErasureReport]:
+    catalogs = [catalog_of(layer) for layer in LAYERS]
+    trino = trino or TrinoClient(session_properties=iceberg.retention_session(catalogs, "0s"), source="lakehouse-erasure")
+    table = _ensure_request_table(trino)
+    pending = trino.execute(f"select request_id, subject_key, requested_by, reason from {table} order by requested_at")
+    reports = []
+    for request_id, key, requested_by, reason in pending:
+        report = erase_subject(subject_key=key, requested_by=requested_by, reason=f"{reason} (request {request_id})",
+                               verify_storage=verify_storage, trino=trino, s3=s3)
+        trino.execute(f"delete from {table} where request_id = ?", [request_id])
+        reports.append(report)
+    if pending:
+        iceberg.purge_history(trino, iceberg.TableRef(catalog_of("curated"), AUDIT_SCHEMA, REQUEST_TABLE))
+    return reports
