@@ -1,0 +1,15 @@
+.venv/
+.harness/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+transform/target/
+transform/logs/
+transform/dbt_packages/
+.dlt/secrets.toml
+*.egg-info/
+.tools/
+logs/
+.env

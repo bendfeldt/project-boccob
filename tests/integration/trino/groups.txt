@@ -1,0 +1,5 @@
+platform-admin:alice-admin
+data-engineer:erik-engineer,svc-dagster
+analyst:anna-analyst,petra-pii
+pii-reader:petra-pii
+auditor:axel-auditor

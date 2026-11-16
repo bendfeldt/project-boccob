@@ -1,0 +1,27 @@
+# Fictional Danish municipal citizen-service system ("Borgerportal"). 100 % synthetic data.
+name: borgerportal
+description: Synthetic municipal case management system (citizens, cases, payments, case types)
+owner: team-borgerservice
+extractor: ingestion.sources.borgerportal.extract:extract
+options:            # override with INGEST_BORGERPORTAL_<OPTION>
+  seed: 20260105
+  citizens: 200
+entities:
+  - name: citizens
+    description: Citizen master data, JSON API envelope (changed records + tombstones per batch)
+    format: json
+    options: {record_path: data}
+    identifiers: {cpr: cpr}
+  - name: cases
+    description: Case records, XML export
+    format: xml
+    options: {record_tag: case}
+    identifiers: {cpr: cpr}
+  - name: payments
+    description: Payment transactions, semicolon separated CSV with Danish number/date formats
+    format: csv
+    options: {delimiter: ";"}
+    identifiers: {cpr: cpr}
+  - name: case_types
+    description: Reference table of case types, full snapshot as parquet
+    format: parquet

@@ -1,0 +1,15 @@
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.rest-catalog.uri=http://sol-polaris:8181/api/catalog
+iceberg.rest-catalog.warehouse=@LAYER@
+iceberg.rest-catalog.security=OAUTH2
+iceberg.rest-catalog.oauth2.credential=${ENV:POLARIS_CREDENTIAL}
+iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
+iceberg.rest-catalog.vended-credentials-enabled=false
+iceberg.file-format=PARQUET
+fs.native-s3.enabled=true
+s3.endpoint=http://sol-rustfs:9000
+s3.path-style-access=true
+s3.region=${ENV:S3_REGION}
+s3.aws-access-key=${ENV:S3_ACCESS_KEY_ID}
+s3.aws-secret-key=${ENV:S3_SECRET_ACCESS_KEY}
