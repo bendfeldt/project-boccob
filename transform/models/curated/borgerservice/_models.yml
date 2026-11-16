@@ -1,0 +1,273 @@
+version: 2
+
+groups:
+  - name: borgerservice
+    owner:
+      name: Team Borgerservice Data
+      email: borgerservice-data@kommune.example
+
+models:
+  - name: dim_citizen
+    description: Citizen dimension (SCD2). Keys from curated.keystore.dim_citizen.
+    config:
+      group: borgerservice
+      meta:
+        owner: team-borgerservice
+        gdpr: {subject_column: person_id, erasure: keystore, retention_days: 1825}
+    data_tests:
+      - keystore_integrity
+      - keystore_stable_since_baseline
+      - scd2_no_overlap:
+          arguments: {business_key: person_id}
+      - scd2_contiguous_one_current:
+          arguments: {business_key: person_id}
+    columns:
+      - name: citizen_key
+        description: Surrogate key (stable sequential integer from the keystore); -1 = unknown
+        config: {meta: {pii: none}}
+        data_tests: [not_null, unique]
+      - name: person_id
+        description: Business key - pseudonymised person key
+        config: {meta: {pii: indirect, pseudonymised: true}}
+        data_tests: [not_null]
+      - name: full_name
+        description: Full name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: postal_code
+        description: Postal code
+        config: {meta: {pii: indirect}}
+      - name: postal_district
+        description: Postal district
+        config: {meta: {pii: indirect}}
+      - name: municipality_code
+        description: Municipality code
+        config: {meta: {pii: indirect}}
+      - name: email
+        description: E-mail address
+        config: {meta: {pii: direct, mask: email}}
+      - name: birth_year
+        description: Year of birth (generalised from the date of birth)
+        config: {meta: {pii: indirect}}
+      - name: is_deregistered
+        description: Person is no longer registered in the source
+        config: {meta: {pii: none}}
+      - name: valid_from
+        description: Version valid from (inclusive)
+        config: {meta: {pii: none}}
+      - name: valid_to
+        description: Version valid to (exclusive)
+        config: {meta: {pii: none}}
+      - name: is_current
+        description: Newest version of the member
+        config: {meta: {pii: none}}
+      - name: is_inferred
+        description: Placeholder created by a fact load before master data arrived
+        config: {meta: {pii: none}}
+      - name: is_erased
+        description: Member erased on request of the data subject (anonymous placeholder)
+        config: {meta: {pii: none}}
+
+  - name: dim_case_type
+    description: Case type dimension (SCD1). Keys from curated.keystore.dim_case_type.
+    config:
+      group: borgerservice
+      meta: {owner: team-borgerservice}
+    data_tests:
+      - keystore_integrity
+      - keystore_stable_since_baseline
+    columns:
+      - name: case_type_key
+        description: Surrogate key (stable sequential integer from the keystore); -1 = unknown
+        config: {meta: {pii: none}}
+        data_tests: [not_null, unique]
+      - name: case_type_code
+        description: Business key - case type code
+        config: {meta: {pii: none}}
+        data_tests: [not_null, unique]
+      - name: case_type_name
+        description: Case type name
+        config: {meta: {pii: none}}
+      - name: department
+        description: Responsible department
+        config: {meta: {pii: none}}
+      - name: is_active
+        description: Whether the case type is in use
+        config: {meta: {pii: none}}
+      - name: is_inferred
+        description: Placeholder created by a fact load before master data arrived
+        config: {meta: {pii: none}}
+      - name: is_erased
+        description: Always false for non-person dimensions
+        config: {meta: {pii: none}}
+
+  - name: dim_date
+    description: Calendar dimension (date_key = yyyymmdd).
+    config:
+      group: borgerservice
+      meta: {owner: team-borgerservice}
+    columns:
+      - name: date_key
+        description: Date as integer yyyymmdd
+        config: {meta: {pii: none}}
+        data_tests: [not_null, unique]
+      - name: calendar_date
+        description: Calendar date
+        config: {meta: {pii: none}}
+      - name: calendar_year
+        description: Year
+        config: {meta: {pii: none}}
+      - name: calendar_quarter
+        description: Quarter
+        config: {meta: {pii: none}}
+      - name: calendar_month
+        description: Month number
+        config: {meta: {pii: none}}
+      - name: year_month
+        description: Year and month (yyyy-mm)
+        config: {meta: {pii: none}}
+      - name: iso_week
+        description: ISO week number
+        config: {meta: {pii: none}}
+      - name: iso_day_of_week
+        description: ISO day of week (1 = Monday)
+        config: {meta: {pii: none}}
+      - name: is_weekend
+        description: Saturday or Sunday
+        config: {meta: {pii: none}}
+
+  - name: fact_payment
+    description: Payment fact (one row per payment).
+    config:
+      group: borgerservice
+      meta:
+        owner: team-oekonomi
+        gdpr:
+          subject_dimension: dim_citizen
+          subject_key_column: citizen_key
+          erasure: anonymise          # keep the booking, cut the link to the person (bookkeeping duty)
+          retention_days: 1825
+    columns:
+      - name: payment_id
+        description: Payment number (degenerate dimension)
+        config: {meta: {pii: none}}
+        data_tests: [not_null, unique]
+      - name: citizen_key
+        description: Citizen dimension key (version valid on the payment date)
+        config: {meta: {pii: none}}
+        data_tests:
+          - not_null
+          - keystore_usage:
+              arguments: {dimension: dim_citizen}
+      - name: case_type_key
+        description: Case type dimension key
+        config: {meta: {pii: none}}
+        data_tests:
+          - not_null
+          - keystore_usage:
+              arguments: {dimension: dim_case_type}
+      - name: payment_date_key
+        description: Payment date key
+        config: {meta: {pii: none}}
+        data_tests:
+          - relationships:
+              arguments: {to: "ref('dim_date')", field: date_key}
+      - name: case_id
+        description: Case number (degenerate dimension)
+        config: {meta: {pii: indirect}}
+      - name: amount
+        description: Amount, negative = paid out
+        config: {meta: {pii: indirect}}
+      - name: currency_code
+        description: ISO 4217 currency code
+        config: {meta: {pii: none}}
+      - name: status
+        description: Payment status
+        config: {meta: {pii: none}}
+      - name: booked_at
+        description: Booking timestamp
+        config: {meta: {pii: none}}
+      - name: _source_loaded_at
+        description: Load time of the underlying clean row
+        config: {meta: {pii: none}}
+      - name: _invocation_id
+        description: dbt invocation that wrote the row
+        config: {meta: {pii: none}}
+      - name: _transformed_at
+        description: Time the row was written
+        config: {meta: {pii: none}}
+
+  - name: dp_payment_summary
+    description: >
+      Data product "Payment summary": monthly payment totals per municipality and case type.
+      Aggregated, contains no person-level data. Cells based on fewer than 5 citizens are flagged
+      (is_small_cell) and hidden from analysts by an OPA row filter.
+    access: public
+    latest_version: 1
+    versions:
+      - v: 1
+    config:
+      group: borgerservice
+      contract: {enforced: true}
+      meta:
+        owner: team-oekonomi
+        data_product:
+          name: payment-summary
+          steward: oekonomi-data@kommune.example
+          sla: {freshness_hours: 26, availability: "99.5%"}
+          classification: internal
+        row_filter:
+          expression: "is_small_cell = false"
+          exempt_groups: [platform-admin, data-engineer, pii-reader]
+    data_tests:
+      - unique_combination:
+          arguments: {columns: [year_month, municipality_code, case_type_code]}
+      - expression_is_true:
+          arguments: {expression: "is_small_cell = (citizen_count < 5)"}
+    columns:
+      - name: year_month
+        description: Month of the payment date (yyyy-mm)
+        data_type: varchar
+        config: {meta: {pii: none}}
+        data_tests: [not_null]
+      - name: municipality_code
+        description: Municipality of the citizen on the payment date
+        data_type: varchar
+        config: {meta: {pii: none}}
+      - name: case_type_code
+        description: Case type code
+        data_type: varchar
+        config: {meta: {pii: none}}
+      - name: case_type_name
+        description: Case type name
+        data_type: varchar
+        config: {meta: {pii: none}}
+      - name: payment_count
+        description: Number of payments
+        data_type: bigint
+        config: {meta: {pii: none}}
+      - name: citizen_count
+        description: Number of distinct citizens
+        data_type: bigint
+        config: {meta: {pii: none}}
+      - name: total_amount
+        description: Sum of amounts in DKK
+        data_type: decimal(38,2)
+        config: {meta: {pii: none}}
+      - name: is_small_cell
+        description: True when the cell is based on fewer citizens than the disclosure threshold
+        data_type: boolean
+        config: {meta: {pii: none}}
+
+exposures:
+  - name: payment_summary_dashboard
+    label: Payment summary dashboard
+    type: dashboard
+    maturity: medium
+    description: Finance department dashboard and open-data export built on the payment summary data product.
+    depends_on:
+      - ref('dp_payment_summary', v=1)
+    owner:
+      name: Team Økonomi
+      email: oekonomi-data@kommune.example
+    config:
+      meta: {consumers: [finance, open-data-portal], contains_pii: false}

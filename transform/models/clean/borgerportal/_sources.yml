@@ -1,0 +1,46 @@
+version: 2
+
+sources:
+  - name: raw_borgerportal
+    description: >
+      Schema-on-read index of the Borgerportal landing area (written by the ingestion index stage).
+      One row per source record; `payload` is the record as JSON text.
+    database: "{{ env_var('RAW_CATALOG', 'raw') }}"
+    schema: borgerportal
+    loader: dlt
+    config:
+      meta: {layer: raw, source_system: borgerportal, contains_pii: true}
+      loaded_at_field: _loaded_at
+      freshness: {warn_after: {count: 36, period: hour}}
+    tables:
+      - name: citizens
+        description: Citizen master data (JSON API envelope)
+        columns: &raw_columns
+          - name: payload
+            description: Source record rendered as JSON text, untyped
+            data_tests: [not_null]
+          - name: _raw_file
+            description: Object key of the native file in the raw bucket
+            data_tests: [not_null]
+          - name: _raw_row
+            description: Position of the record in the native file
+          - name: _load_id
+            description: Landing load id
+            data_tests: [not_null]
+          - name: _loaded_at
+            description: Time the record was indexed
+          - name: _raw_format
+            description: Native format of the file
+          - name: _raw_sha256
+            description: SHA-256 of the native file
+          - name: _subject_keys
+            description: JSON map of pseudonymised person identifiers found in the record
+      - name: cases
+        description: Case records (XML export)
+        columns: *raw_columns
+      - name: payments
+        description: Payment transactions (CSV export)
+        columns: *raw_columns
+      - name: case_types
+        description: Case type reference data (parquet snapshot)
+        columns: *raw_columns

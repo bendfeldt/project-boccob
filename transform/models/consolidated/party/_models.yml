@@ -1,0 +1,68 @@
+version: 2
+
+models:
+  - name: person
+    description: >
+      Business entity Person (consolidated layer). Change history of every person known to the
+      municipality, in business vocabulary and independent of the delivering source system.
+    config:
+      meta:
+        owner: team-data-governance
+        gdpr: {subject_column: person_id, erasure: delete, retention_days: 1825}
+    data_tests:
+      - unique_combination:
+          arguments: {columns: [person_id, valid_from]}
+    columns:
+      - name: person_id
+        description: Pseudonymised person key (HMAC of the CPR number)
+        config: {meta: {pii: indirect, pseudonymised: true}}
+        data_tests: [not_null, pseudonym_format]
+      - name: source_system
+        description: System that delivered this state
+        config: {meta: {pii: none}}
+      - name: given_name
+        description: Given name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: family_name
+        description: Family name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: full_name
+        description: Full name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: address_line
+        description: Street and house number
+        config: {meta: {pii: direct, mask: redact}}
+      - name: postal_code
+        description: Postal code
+        config: {meta: {pii: indirect}}
+      - name: postal_district
+        description: Postal district
+        config: {meta: {pii: indirect}}
+      - name: municipality_code
+        description: Municipality code
+        config: {meta: {pii: indirect}}
+      - name: email
+        description: E-mail address
+        config: {meta: {pii: direct, mask: email}}
+      - name: phone
+        description: Phone number
+        config: {meta: {pii: direct, mask: redact}}
+      - name: birth_date
+        description: Date of birth
+        config: {meta: {pii: direct, mask: "null"}}
+      - name: is_deregistered
+        description: Person is no longer registered in the source
+        config: {meta: {pii: none}}
+      - name: valid_from
+        description: Time from which this state applies
+        config: {meta: {pii: none}}
+        data_tests: [not_null]
+      - name: _source_loaded_at
+        description: Load time of the underlying clean row
+        config: {meta: {pii: none}}
+      - name: _invocation_id
+        description: dbt invocation that wrote the row
+        config: {meta: {pii: none}}
+      - name: _transformed_at
+        description: Time the row was written
+        config: {meta: {pii: none}}

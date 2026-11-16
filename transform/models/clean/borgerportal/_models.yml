@@ -1,0 +1,211 @@
+version: 2
+
+# Column classification (GDPR): every column carries config.meta.pii
+#   none | indirect | direct | sensitive   (+ cpr: true for CPR numbers, mask: <strategy>)
+# enforced by `make check-classification`; the OPA masking data is generated from it.
+
+models:
+  - name: citizens
+    description: Citizen change history from Borgerportal - typed, deduplicated, address denormalised.
+    config:
+      meta:
+        owner: team-borgerservice
+        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825}
+    data_tests:
+      - unique_combination:
+          arguments: {columns: [citizen_id, source_updated_at]}
+    columns:
+      - name: citizen_id
+        description: Pseudonymised person key - HMAC-SHA256 of the CPR number with a secret pepper
+        config: {meta: {pii: indirect, pseudonymised: true}}
+        data_tests: [not_null, pseudonym_format]
+      - name: cpr_number
+        description: CPR number (civil registration number) exactly as delivered
+        config: {meta: {pii: direct, cpr: true, mask: redact}}
+        data_tests:
+          - not_null
+          - cpr_shape
+      - name: first_name
+        description: Given name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: last_name
+        description: Family name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: full_name
+        description: Given and family name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: street
+        description: Street name
+        config: {meta: {pii: direct, mask: redact}}
+      - name: house_no
+        description: House number
+        config: {meta: {pii: direct, mask: redact}}
+      - name: address_line
+        description: Street and house number
+        config: {meta: {pii: direct, mask: redact}}
+      - name: postal_code
+        description: Postal code
+        config: {meta: {pii: indirect}}
+      - name: city
+        description: Postal district
+        config: {meta: {pii: indirect}}
+      - name: municipality_code
+        description: Municipality code (kommunekode)
+        config: {meta: {pii: indirect}}
+      - name: email
+        description: E-mail address, lower-cased
+        config: {meta: {pii: direct, mask: email}}
+      - name: phone
+        description: Phone number
+        config: {meta: {pii: direct, mask: redact}}
+      - name: birth_date
+        description: Date of birth
+        config: {meta: {pii: direct, mask: "null"}}
+      - name: is_deleted
+        description: True when the source reported the citizen as deleted (tombstone)
+        config: {meta: {pii: none}}
+      - name: source_updated_at
+        description: Change timestamp in the source system
+        config: {meta: {pii: none}}
+        data_tests: [not_null]
+      - &tc_raw_file
+        name: _raw_file
+        description: Lineage - native file the record came from
+        config: {meta: {pii: none}}
+      - &tc_raw_row
+        name: _raw_row
+        description: Lineage - position in the native file
+        config: {meta: {pii: none}}
+      - &tc_load_id
+        name: _load_id
+        description: Lineage - landing load id
+        config: {meta: {pii: none}}
+      - &tc_loaded_at
+        name: _loaded_at
+        description: Lineage - time the record was indexed in raw
+        config: {meta: {pii: none}}
+      - &tc_invocation_id
+        name: _invocation_id
+        description: dbt invocation that wrote the row
+        config: {meta: {pii: none}}
+      - &tc_transformed_at
+        name: _transformed_at
+        description: Time the row was written
+        config: {meta: {pii: none}}
+
+  - name: cases
+    description: Latest state of every case.
+    config:
+      meta:
+        owner: team-borgerservice
+        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825}
+    columns:
+      - name: case_id
+        description: Case number
+        config: {meta: {pii: indirect}}
+        data_tests: [not_null, unique]
+      - name: citizen_id
+        description: Pseudonymised person key of the case party
+        config: {meta: {pii: indirect, pseudonymised: true}}
+        data_tests: [not_null, pseudonym_format]
+      - name: case_type_code
+        description: Case type code
+        config: {meta: {pii: none}}
+        data_tests:
+          - relationships:
+              arguments: {to: "ref('case_types')", field: case_type_code}
+      - name: status
+        description: Case status
+        config: {meta: {pii: none}}
+        data_tests:
+          - accepted_values:
+              arguments: {values: [open, closed, rejected]}
+      - name: opened_date
+        description: Date the case was opened
+        config: {meta: {pii: none}}
+      - name: closed_date
+        description: Date the case was closed
+        config: {meta: {pii: none}}
+      - name: caseworker_initials
+        description: Initials of the responsible caseworker (employee)
+        config: {meta: {pii: indirect, mask: redact}}
+      - name: source_updated_at
+        description: Change timestamp in the source system
+        config: {meta: {pii: none}}
+      - *tc_raw_file
+      - *tc_raw_row
+      - *tc_load_id
+      - *tc_loaded_at
+      - *tc_invocation_id
+      - *tc_transformed_at
+
+  - name: case_types
+    description: Case type reference data (newest snapshot).
+    config:
+      meta: {owner: team-borgerservice}
+    columns:
+      - name: case_type_code
+        description: Case type code
+        config: {meta: {pii: none}}
+        data_tests: [not_null, unique]
+      - name: case_type_name
+        description: Case type name
+        config: {meta: {pii: none}}
+      - name: department
+        description: Responsible department
+        config: {meta: {pii: none}}
+      - name: is_active
+        description: Whether the case type is in use
+        config: {meta: {pii: none}}
+      - *tc_load_id
+      - *tc_loaded_at
+      - *tc_invocation_id
+      - *tc_transformed_at
+
+  - name: payments
+    description: Payment transactions with case attributes.
+    config:
+      meta:
+        owner: team-oekonomi
+        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825}
+    columns:
+      - name: payment_id
+        description: Payment number
+        config: {meta: {pii: none}}
+        data_tests: [not_null, unique]
+      - name: case_id
+        description: Case the payment belongs to
+        config: {meta: {pii: indirect}}
+      - name: citizen_id
+        description: Pseudonymised person key of the payer / payee
+        config: {meta: {pii: indirect, pseudonymised: true}}
+        data_tests: [pseudonym_format]
+      - name: case_type_code
+        description: Case type of the case (denormalised)
+        config: {meta: {pii: none}}
+      - name: amount
+        description: Amount in the stated currency, negative = paid out
+        config: {meta: {pii: indirect}}
+        data_tests: [not_null]
+      - name: currency_code
+        description: ISO 4217 currency code
+        config: {meta: {pii: none}}
+        data_tests:
+          - accepted_values:
+              arguments: {values: [DKK]}
+      - name: payment_date
+        description: Value date of the payment
+        config: {meta: {pii: none}}
+        data_tests: [not_null]
+      - name: booked_at
+        description: Booking timestamp
+        config: {meta: {pii: none}}
+      - name: status
+        description: Payment status
+        config: {meta: {pii: none}}
+      - *tc_raw_file
+      - *tc_raw_row
+      - *tc_load_id
+      - *tc_loaded_at
+      - *tc_invocation_id
+      - *tc_transformed_at

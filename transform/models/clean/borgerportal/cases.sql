@@ -1,0 +1,59 @@
+{{
+  config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key='case_id',
+    on_schema_change='fail'
+  )
+}}
+-- Latest known state of every case.
+with raw as (
+  select {{ raw_columns() }}
+  from {{ source('raw_borgerportal', 'cases') }}
+  {{ raw_incremental_filter() }}
+),
+
+parsed as (
+  select
+    {{ json_text('$["@id"]') }} as case_id,
+    {{ subject_key('cpr') }} as citizen_id,
+    {{ json_text('$.type["@code"]') }} as case_type_code,
+    lower({{ json_text('$.status') }}) as status,
+    try_cast({{ json_text('$.opened') }} as date) as opened_date,
+    try_cast({{ json_text('$.closed') }} as date) as closed_date,
+    {{ json_text('$.caseworker') }} as caseworker_initials,
+    {{ ts6("try(from_iso8601_timestamp(" ~ json_text('$.updated_at') ~ "))") }} as source_updated_at,
+    _raw_file,
+    _raw_row,
+    _load_id,
+    _loaded_at
+  from raw
+),
+
+deduplicated as (
+  select
+    *,
+    row_number() over (
+      partition by case_id
+      order by source_updated_at desc, _load_id desc, _raw_row desc
+    ) as _rn
+  from parsed
+  where case_id is not null
+)
+
+select
+  case_id,
+  citizen_id,
+  case_type_code,
+  status,
+  opened_date,
+  closed_date,
+  caseworker_initials,
+  source_updated_at,
+  _raw_file,
+  _raw_row,
+  _load_id,
+  _loaded_at,
+  {{ audit_columns() }}
+from deduplicated
+where _rn = 1

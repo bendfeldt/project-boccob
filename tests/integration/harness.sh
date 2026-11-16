@@ -110,7 +110,7 @@ PY
     curl -fsS --noproxy '*' -X POST "http://localhost:${POLARIS_PORT}/api/management/v1/catalogs" \
       -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' -d @- >/dev/null <<JSON
 {"catalog": {"name": "${layer}", "type": "INTERNAL",
-  "properties": {"default-base-location": "s3://lakehouse-${layer}/iceberg"},
+  "properties": {"default-base-location": "s3://lakehouse-${layer}/iceberg", "polaris.config.drop-with-purge.enabled": "true"},
   "storageConfigInfo": {"storageType": "S3", "allowedLocations": ["s3://lakehouse-${layer}/"],
     "endpoint": "http://localhost:${RUSTFS_PORT}", "endpointInternal": "http://sol-rustfs:9000",
     "pathStyleAccess": true, "stsUnavailable": true, "region": "${S3_REGION}"}}}

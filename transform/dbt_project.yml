@@ -1,0 +1,55 @@
+name: boccob
+version: "0.1.0"
+config-version: 2
+profile: boccob
+require-dbt-version: [">=1.10.0", "<2.0.0"]
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: target
+clean-targets: ["target", "dbt_packages", "logs"]
+
+vars:
+  # catalogs (one per layer) come from the environment: RAW_CATALOG, CLEAN_CATALOG,
+  # CONSOLIDATED_CATALOG, CURATED_CATALOG (defaults: raw, clean, consolidated, curated)
+  keystore_schema: keystore
+  keystore_key_type: bigint          # sequential integer surrogate keys (64 bit)
+  keystore_max_attempts: 3           # optimistic allocation retries, see docs/keystore.md
+  scd_default_type: 2                # dimensions are SCD2 unless a model sets scd_type: 1
+  scd_begin_of_time: "timestamp '1900-01-01 00:00:00.000000 UTC'"
+  scd_end_of_time: "timestamp '9999-12-31 00:00:00.000000 UTC'"
+  small_cell_threshold: 5            # disclosure control for published aggregates
+
+models:
+  boccob:
+    +on_table_exists: replace        # CREATE OR REPLACE: atomic swap, no rename/drop on the REST catalog
+    +persist_docs: {relation: true, columns: true}
+    clean:
+      +database: "{{ env_var('CLEAN_CATALOG', 'clean') }}"
+      +meta: {layer: clean}
+      +tags: [clean]
+      borgerportal:
+        +schema: borgerportal
+        +meta: {source_system: borgerportal}
+    consolidated:
+      +database: "{{ env_var('CONSOLIDATED_CATALOG', 'consolidated') }}"
+      +meta: {layer: consolidated}
+      +tags: [consolidated]
+      party:
+        +schema: party
+    curated:
+      +database: "{{ env_var('CURATED_CATALOG', 'curated') }}"
+      +meta: {layer: curated}
+      +tags: [curated]
+      borgerservice:
+        +schema: borgerservice
+
+data_tests:
+  boccob:
+    +database: "{{ env_var('CURATED_CATALOG', 'curated') }}"
+    +schema: dbt_test_audit
+
+flags:
+  require_certificate_validation: true   # TLS certificates are always verified (internal CA bundle)
+  send_anonymous_usage_stats: false
