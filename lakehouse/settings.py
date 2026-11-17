@@ -15,6 +15,11 @@ from pathlib import Path
 LAYERS = ("raw", "clean", "consolidated", "curated")
 
 
+def layer_bucket(layer: str) -> str:
+    """Bucket of a layer (``<LAYER>_BUCKET``, default ``lakehouse-<layer>``)."""
+    return os.environ.get(f"{layer.upper()}_BUCKET", f"lakehouse-{layer}")
+
+
 class MissingSettingError(RuntimeError):
     pass
 
@@ -57,6 +62,28 @@ class S3Settings:
             raw_bucket=env("RAW_BUCKET", "lakehouse-raw"),
             index_prefix=env("RAW_INDEX_PREFIX", "iceberg").strip("/"),
             ca_bundle=env("LAKEHOUSE_CA_BUNDLE"),
+        )
+
+    @classmethod
+    def for_purge(cls) -> S3Settings:
+        """Credentials allowed to remove object versions in all lakehouse buckets.
+
+        ``PURGE_S3_ACCESS_KEY_ID`` / ``PURGE_S3_SECRET_ACCESS_KEY`` (s3:ListBucketVersions,
+        s3:GetObjectVersion, s3:DeleteObjectVersion on the four layer buckets); falls back to the
+        ingestion credentials when unset (local harness).
+        """
+        base = cls.from_env()
+        key = env("PURGE_S3_ACCESS_KEY_ID")
+        if not key:
+            return base
+        return cls(
+            endpoint_url=base.endpoint_url,
+            access_key_id=key,
+            secret_access_key=env("PURGE_S3_SECRET_ACCESS_KEY", required=True),
+            region=base.region,
+            raw_bucket=base.raw_bucket,
+            index_prefix=base.index_prefix,
+            ca_bundle=base.ca_bundle,
         )
 
     @property

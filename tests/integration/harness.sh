@@ -77,16 +77,19 @@ up() {
     "$RUSTFS_IMAGE" >/dev/null
   wait_http "http://localhost:${RUSTFS_PORT}/health" || wait_http "http://localhost:${RUSTFS_PORT}/minio/health/live" 5
 
-  log "creating buckets"
+  log "creating versioned buckets"
   (cd "$ROOT" && uv run --no-sync python - <<'PY'
 import os, s3fs
 fs = s3fs.S3FileSystem(key=os.environ["S3_ACCESS_KEY_ID"], secret=os.environ["S3_SECRET_ACCESS_KEY"],
                        client_kwargs={"endpoint_url": os.environ["S3_ENDPOINT_URL"], "region_name": os.environ["S3_REGION"]})
+from lakehouse.objectstore import _sync_call, enable_versioning
 for layer in ("raw", "clean", "consolidated", "curated"):
     b = f"lakehouse-{layer}"
     if not fs.exists(b):
         fs.mkdir(b)
-print("buckets:", sorted(fs.ls("")))
+    enable_versioning(fs, b)  # as on the platform: deletes leave noncurrent versions behind
+    assert _sync_call(fs, "get_bucket_versioning", Bucket=b).get("Status") == "Enabled", b
+print("buckets (versioned):", sorted(fs.ls("")))
 PY
   )
 

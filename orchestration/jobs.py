@@ -44,7 +44,7 @@ daily_refresh_job = dg.define_asset_job(
 
 class MaintenanceConfig(dg.Config):
     layers: list[str] = list(LAYERS)  # noqa: RUF012 - pydantic copies defaults
-    operations: list[str] = ["optimize", "expire_snapshots", "remove_orphan_files"]  # noqa: RUF012
+    operations: list[str] = ["optimize", "expire_snapshots", "remove_orphan_files", "purge_noncurrent_versions"]  # noqa: RUF012
 
 
 @dg.op(pool=WRITER_POOL, description="optimize / expire_snapshots / remove_orphan_files on all layer tables")

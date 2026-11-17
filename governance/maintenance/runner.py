@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 from governance import iceberg
 from governance.config import RetentionConfig, catalog_of, load_retention
-from lakehouse.settings import LAYERS
+from lakehouse.objectstore import purge_noncurrent
+from lakehouse.settings import LAYERS, S3Settings, layer_bucket
 from lakehouse.trino_client import TrinoClient
 
 log = logging.getLogger(__name__)
-OPERATIONS = ("optimize", "expire_snapshots", "remove_orphan_files")
+OPERATIONS = ("optimize", "expire_snapshots", "remove_orphan_files", "purge_noncurrent_versions")
+_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def duration_seconds(value: str) -> int:
+    return int(value[:-1]) * _UNITS[value[-1]]
 
 
 @dataclass
@@ -45,6 +52,8 @@ def run_maintenance(
         policy = config.layers[layer]
         for table in iceberg.list_tables(trino, catalog_of(layer), config.exclude_schemas, schema):
             for op in operations:
+                if op == "purge_noncurrent_versions":
+                    continue  # bucket level, below
                 try:
                     if op == "optimize":
                         iceberg.optimize(trino, table, config.optimize_file_size_threshold)
@@ -56,5 +65,24 @@ def run_maintenance(
                 except Exception as exc:  # keep going: one broken table must not block the rest
                     log.error("maintenance %s failed on %s: %s", op, table, exc)
                     report.failed.append({"table": str(table), "operation": op, "error": str(exc)[:500]})
+    if "purge_noncurrent_versions" in operations and schema is None:
+        # Files removed by expire_snapshots / remove_orphan_files / DROP TABLE stay readable as
+        # noncurrent versions on a versioned bucket. They are removed once they have been
+        # noncurrent for longer than the layer's orphan file retention (the recovery window).
+        purge_s3 = S3Settings.for_purge()
+        fs = purge_s3.filesystem()
+        for layer in layers:
+            bucket = purge_s3.raw_bucket if layer == "raw" else layer_bucket(layer)
+            cutoff = datetime.now(UTC) - timedelta(seconds=duration_seconds(config.layers[layer].orphan_file_retention))
+            try:
+                removed = purge_noncurrent(fs, bucket, older_than=cutoff)
+                report.done.append(
+                    {"table": f"s3://{bucket}", "operation": "purge_noncurrent_versions", "removed": removed}
+                )
+            except Exception as exc:
+                log.error("purge of noncurrent versions failed in %s: %s", bucket, exc)
+                report.failed.append(
+                    {"table": f"s3://{bucket}", "operation": "purge_noncurrent_versions", "error": str(exc)[:500]}
+                )
     log.info("maintenance finished: %d ok, %d failed", len(report.done), len(report.failed))
     return report

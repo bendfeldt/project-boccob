@@ -10,7 +10,8 @@ from lakehouse.trino_client import TrinoClient, fqn, ident
 
 log = logging.getLogger(__name__)
 _DURATION = re.compile(r"^\d+(s|m|h|d)$")
-_SIZE = re.compile(r"^\d+(kB|MB|GB)$")
+_SIZE = re.compile(r"^\d+(kB|MB|GB|TB)$")
+ERASURE_OPTIMIZE_THRESHOLD = "1TB"
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,8 @@ def reset_empty_table(trino: TrinoClient, table: TableRef) -> bool:
 def purge_history(trino: TrinoClient, table: TableRef) -> None:
     """Make deleted rows physically unrecoverable.
 
-    1. optimize             data files that carry row-level deletes are rewritten without those rows
+    1. optimize             all data files below 1TB are rewritten; rows deleted by position or
+                            equality delete files are dropped in the process
     2. optimize_manifests   manifest entries of removed files (with their column bounds) are dropped
     3. reset_empty_table    covers the case that nothing is left to rewrite
     4. expire_snapshots(0s) every older snapshot with its data files, delete files and manifests goes
@@ -113,7 +115,9 @@ def purge_history(trino: TrinoClient, table: TableRef) -> None:
     Requires a connection created with :func:`retention_session` (0s floor). Must not run while
     other writers are active on the table: files of in-flight commits would count as orphans.
     """
-    optimize(trino, table)
+    # every data file must be considered, whatever its size: Trino's default threshold (100MB)
+    # would leave larger files - and the deleted rows they still contain - untouched
+    optimize(trino, table, ERASURE_OPTIMIZE_THRESHOLD)
     optimize_manifests(trino, table)
     reset_empty_table(trino, table)
     expire_snapshots(trino, table, "0s")

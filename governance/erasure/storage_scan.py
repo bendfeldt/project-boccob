@@ -1,6 +1,7 @@
 """Deep verification: prove that an erased subject is physically gone from object storage.
 
-Reads every object of the given buckets and searches for the needles (identifier, pseudonym).
+Reads every object version (current and noncurrent) of the given buckets and searches it for the
+needles (identifier, pseudonym).
 Parquet files are decoded column by column, Avro files (Iceberg manifests, which carry column
 min/max bounds truncated to 16 characters) record by record; everything else is searched as bytes.
 This is O(size of the lake) and meant for erasure verification and tests, not for routine use.
@@ -68,11 +69,19 @@ def object_contains(path: str, data: bytes, needles: list[str]) -> bool:
 
 
 def scan_storage(fs: Any, buckets: list[str], needles: list[str]) -> list[str]:
-    """Return the objects that still contain one of the needles."""
+    """Return every object version (current or noncurrent) that still contains one of the needles.
+
+    Noncurrent versions are included: on a versioned bucket a deleted object is still readable
+    by version id. Hits are reported as ``s3://bucket/key?versionId=...``.
+    """
+    from lakehouse.objectstore import iter_versions, read_version
+
     needles = [n for n in needles if n]
     hits = []
     for bucket in buckets:
-        for path in fs.find(bucket):
-            if object_contains(path, fs.cat_file(path), needles):
-                hits.append(f"s3://{path}")
+        for version in iter_versions(fs, bucket):
+            if version.is_delete_marker:
+                continue
+            if object_contains(version.key, read_version(fs, bucket, version), needles):
+                hits.append(f"s3://{bucket}/{version.key}?versionId={version.version_id}")
     return hits
