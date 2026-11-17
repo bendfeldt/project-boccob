@@ -33,6 +33,26 @@ class RetentionPlan:
     landing_cutoff: date | None = None
     uncommitted_cutoff: date | None = None
     skipped: list[str] = field(default_factory=list)  # tables without a time based rule
+    deregistrations: list[Deregistration] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Deregistration:
+    """Subjects whose latest state in ``table`` is deregistered since before ``cutoff``."""
+
+    table: str
+    select_sql: str  # yields subject keys due for erasure; contains no key literal
+    reason: str
+
+
+def deregistration_select(t: cm.TableClass, rule: dict, cutoff: date, queue_sql: str) -> str:
+    subject, flag, since = (ident(t.gdpr["subject_column"]), ident(rule["flag_column"]), ident(rule["since_column"]))
+    return (
+        f"select s.subject from (select {subject} as subject, max_by({flag}, {since}) as flag, "
+        f"max({since}) as since from {fqn(t.catalog, t.schema, t.table)} group by 1) s "
+        f"where s.flag and s.since < timestamp '{cutoff.isoformat()} 00:00:00 UTC' "
+        f"and s.subject not in (select subject_key from {queue_sql})"
+    )
 
 
 def plan_retention(
@@ -62,8 +82,21 @@ def plan_retention(
                         + (" (latest snapshot kept)" if entity.snapshot else ""),
                     )
                 )
+    from governance.erasure.queue import queue_table_sql
+
     for t in tables:
         if t.resource_type != "model":
+            continue
+        rule = t.gdpr.get("deregistration")
+        if rule:
+            cutoff = today - timedelta(days=int(rule["grace_days"]))
+            plan.deregistrations.append(
+                Deregistration(
+                    table=t.key,
+                    select_sql=deregistration_select(t, rule, cutoff, queue_table_sql()),
+                    reason=f"deregistered for more than {rule['grace_days']} days ({t.key})",
+                )
+            )
             continue
         days, column = t.gdpr.get("retention_days"), t.gdpr.get("retention_column")
         if not days or not column:
@@ -119,6 +152,7 @@ def run_retention(
         "tables": [],
         "landing_objects": 0,
         "no_time_rule": plan.skipped,
+        "deregistered_subjects": [],
     }
 
     for stmt in plan.statements:
@@ -132,6 +166,24 @@ def run_retention(
             result = trino.execute(stmt.sql)
             rows = result[0][0] if result and result[0] else 0
         report["tables"].append({"table": stmt.table, "rows": rows, "reason": stmt.reason})
+
+    # Master data has no time rule while the person is registered. Deregistered subjects are
+    # queued for the erasure job (all layers, keystore anonymised) once the grace period is over.
+    if plan.deregistrations:
+        from governance.erasure.queue import ensure_queue, queue_table_sql
+
+        ensure_queue()
+        for d in plan.deregistrations:
+            if dry_run:
+                count = trino.scalar(f"select count(*) from ({d.select_sql})")
+            else:
+                result = trino.execute(
+                    f"insert into {queue_table_sql()} "
+                    "select cast(uuid() as varchar), subject, 'subject_key', 'retention-policy', "
+                    f"'{d.reason}', current_timestamp from ({d.select_sql})"
+                )
+                count = result[0][0] if result and result[0] else 0
+            report["deregistered_subjects"].append({"table": d.table, "queued_for_erasure": count})
 
     for source in sources:
         prefix = f"{s3.raw_bucket}/{source.name}/"

@@ -161,6 +161,15 @@ def validate(tables: list[TableClass]) -> list[str]:
             problems.append(f"{t.key}: gdpr.subject_column must name a documented column")
         if action == "anonymise" and not (t.gdpr.get("subject_dimension") and t.gdpr.get("subject_key_column")):
             problems.append(f"{t.key}: gdpr.erasure=anonymise needs subject_dimension and subject_key_column")
+        dereg = t.gdpr.get("deregistration")
+        if dereg is not None:
+            names = {c.name for c in t.columns}
+            if not isinstance(dereg, dict) or not {"flag_column", "since_column", "grace_days"} <= set(dereg):
+                problems.append(f"{t.key}: gdpr.deregistration needs flag_column, since_column, grace_days")
+            elif dereg["flag_column"] not in names or dereg["since_column"] not in names:
+                problems.append(f"{t.key}: gdpr.deregistration columns must be documented columns")
+            elif t.gdpr.get("subject_column") not in names:
+                problems.append(f"{t.key}: gdpr.deregistration needs gdpr.subject_column")
         if t.row_filter is not None and not t.row_filter.get("expression"):
             problems.append(f"{t.key}: meta.row_filter needs an expression")
     return problems

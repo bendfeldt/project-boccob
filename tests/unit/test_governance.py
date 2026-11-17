@@ -56,8 +56,13 @@ GOOD = manifest(
             "citizen_id": col("indirect", pseudonymised=True),
             "cpr_number": col("direct", cpr=True, mask="redact"),
             "is_deleted": col("none"),
+            "source_updated_at": col("none"),
         },
-        gdpr={"subject_column": "citizen_id", "erasure": "delete"},
+        gdpr={
+            "subject_column": "citizen_id",
+            "erasure": "delete",
+            "deregistration": {"flag_column": "is_deleted", "since_column": "source_updated_at", "grace_days": 365},
+        },
     ),
     model(
         "payments",
@@ -263,7 +268,41 @@ def test_retention_plan():
         'and _load_id <> (select max_by(_load_id, cast(_load_id as double)) from "raw"."borgerportal"."case_types")'
     ), "the latest reference snapshot is never expired"
     assert plan.landing_cutoff == date(2026, 5, 31)
-    assert "clean.borgerportal.citizens" in plan.skipped, "master data has no time based rule"
+    assert "clean.borgerportal.citizens" not in plan.skipped, "master data has a deregistration rule"
+    (dereg,) = plan.deregistrations
+    assert dereg.table == "clean.borgerportal.citizens"
+    assert dereg.select_sql == (
+        'select s.subject from (select "citizen_id" as subject, max_by("is_deleted", "source_updated_at") as flag, '
+        'max("source_updated_at") as since from "clean"."borgerportal"."citizens" group by 1) s '
+        "where s.flag and s.since < timestamp '2025-06-30 00:00:00 UTC' "
+        'and s.subject not in (select subject_key from "raw"."governance"."erasure_requests")'
+    )
+
+
+def test_deregistration_rule_is_validated():
+    bad = manifest(
+        model(
+            "p",
+            "clean",
+            "s",
+            {"pid": col("indirect", pseudonymised=True), "gone": col("none")},
+            gdpr={
+                "subject_column": "pid",
+                "erasure": "delete",
+                "deregistration": {"flag_column": "gone", "since_column": "missing", "grace_days": 1},
+            },
+        ),
+        model(
+            "q",
+            "clean",
+            "s",
+            {"pid": col("indirect", pseudonymised=True)},
+            gdpr={"subject_column": "pid", "erasure": "delete", "deregistration": {"flag_column": "pid"}},
+        ),
+    )
+    problems = "\n".join(cm.validate(cm.tables_from_manifest(bad)))
+    assert "clean.s.p: gdpr.deregistration columns must be documented columns" in problems
+    assert "clean.s.q: gdpr.deregistration needs flag_column, since_column, grace_days" in problems
 
 
 def test_expired_landing_objects():

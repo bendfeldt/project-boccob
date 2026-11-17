@@ -10,8 +10,12 @@ models:
     config:
       meta:
         owner: team-borgerservice
-        # master data: kept while the person is registered (no time based rule), erased on request
-        gdpr: {subject_column: citizen_id, erasure: delete}
+        # master data: kept while the person is registered; erased on request, and erased by the
+        # retention job (via the erasure queue, all layers) one year after deregistration
+        gdpr:
+          subject_column: citizen_id
+          erasure: delete
+          deregistration: {flag_column: is_deleted, since_column: source_updated_at, grace_days: 365}
     data_tests:
       - unique_combination:
           arguments: {columns: [citizen_id, source_updated_at]}
