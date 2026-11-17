@@ -251,6 +251,24 @@
   select 1
 {% endmacro %}
 
+{#
+  Incremental fact models: also reprocess fact rows that point at a key adopted since the row
+  was written. A fact loaded while its member was *inferred* got the inferred key; on adoption
+  that key moves to the member's earliest version, while the event may fall into a later
+  version. Re-selecting those rows lets dim_join pick the version valid at the event time
+  (the merge on the fact's unique key replaces the row).
+  Usage inside the incremental filter:  where <new rows> {{ keystore_rekey_adopted('dim_citizen', 'citizen_key', 'p.payment_id', 'payment_id') }}
+#}
+{% macro keystore_rekey_adopted(dimension, key_column, source_id, fact_id) -%}
+  {%- if is_incremental() %}
+  or {{ source_id }} in (
+    select f.{{ fact_id }} from {{ this }} f
+    join {{ keystore_relation(dimension) }} k on k.surrogate_key = f.{{ key_column }}
+    where k.adopted_at is not null and k.adopted_at > f._transformed_at
+  )
+  {%- endif %}
+{%- endmacro %}
+
 {# run-operation: store the current key assignment of a dimension as a baseline for the
    stability test (tests/keystore/assert_keys_stable_since_baseline.sql). #}
 {% macro keystore_snapshot_baseline(dimensions) %}

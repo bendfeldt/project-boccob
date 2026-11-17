@@ -117,3 +117,15 @@
 {% test expression_is_true(model, expression) %}
   select * from {{ model }} where not ({{ expression }})
 {% endtest %}
+
+{# Facts point at the dimension version that was valid at the event time (SCD2).
+   `at` is an expression on the fact row yielding the event timestamp. Unknown (-1), inferred
+   and erased members are exempt (they are valid for all time). #}
+{% test scd2_version_valid_at_event(model, column_name, dimension, at) %}
+  {% set s = dimension_settings(dimension) %}
+  select f.{{ column_name }} as surrogate_key, f.event_at, d.valid_from, d.valid_to
+  from (select {{ column_name }}, {{ at }} as event_at from {{ model }} where {{ column_name }} > 0) f
+  join {{ ref(dimension) }} d on d.{{ s.surrogate_key }} = f.{{ column_name }}
+  where not d.is_inferred and not d.is_erased
+    and not (f.event_at >= d.valid_from and f.event_at < d.valid_to)
+{% endtest %}

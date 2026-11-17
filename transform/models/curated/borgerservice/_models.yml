@@ -160,6 +160,10 @@ models:
           - not_null
           - keystore_usage:
               arguments: {dimension: dim_citizen}
+          - scd2_version_valid_at_event:
+              arguments:
+                dimension: dim_citizen
+                at: "cast(date_parse(cast(payment_date_key as varchar), '%Y%m%d') as timestamp(6) with time zone)"
       - name: case_type_key
         description: Case type dimension key
         config: {meta: {pii: none}}
