@@ -50,11 +50,16 @@ def plan_retention(
         for source in sources:
             for entity in source.entities:
                 table = fqn(catalog_of("raw"), source.name, entity.name)
+                where = f"_loaded_at < timestamp '{cutoff.isoformat()} 00:00:00 UTC'"
+                if entity.snapshot:
+                    # reference snapshots: the newest delivery stays, whatever its age
+                    where += f" and _load_id <> (select max_by(_load_id, cast(_load_id as double)) from {table})"
                 plan.statements.append(
                     DeleteStatement(
                         table=f"{catalog_of('raw')}.{source.name}.{entity.name}",
-                        sql=f"delete from {table} where _loaded_at < timestamp '{cutoff.isoformat()} 00:00:00 UTC'",
-                        reason=f"raw index retention {raw.index_days}d",
+                        sql=f"delete from {table} where {where}",
+                        reason=f"raw index retention {raw.index_days}d"
+                        + (" (latest snapshot kept)" if entity.snapshot else ""),
                     )
                 )
     for t in tables:
@@ -107,6 +112,7 @@ def run_retention(
     trino = trino or TrinoClient(source="lakehouse-retention")
     s3 = s3 or S3Settings.from_env()
     fs = s3.filesystem()
+    purge_fs = S3Settings.for_purge().filesystem()  # removes every version, not only the current one
     report: dict[str, Any] = {
         "dry_run": dry_run,
         "date": today.isoformat(),
@@ -142,6 +148,6 @@ def run_retention(
         report["landing_objects"] += len(expired)
         if not dry_run:
             for key in expired:
-                delete_permanently(fs, s3.raw_bucket, key)
+                delete_permanently(purge_fs, s3.raw_bucket, key)
     log.info("retention %s", report)
     return report

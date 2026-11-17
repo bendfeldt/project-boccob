@@ -21,6 +21,7 @@ from ingestion.framework.spec import SourceSpec
 from lakehouse.trino_client import fqn, ident
 
 _KEY = re.compile(r"^[0-9a-f]{64}$")
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 KEYSTORE_SCHEMA = "keystore"
 
 
@@ -39,7 +40,7 @@ class Step:
 
 @dataclass
 class ErasurePlan:
-    subject_key: str
+    request_id: str
     raw_file_queries: list[tuple[str, str]] = field(default_factory=list)  # (table, sql listing _raw_file)
     steps: list[Step] = field(default_factory=list)
 
@@ -49,6 +50,12 @@ class ErasurePlan:
         for step in self.steps:
             seen.setdefault(step.table)
         return list(seen)
+
+
+def validate_request_id(request_id: str) -> str:
+    if not _UUID.match(request_id or ""):
+        raise ErasurePlanError("request id must be a lower-case UUID")
+    return request_id
 
 
 def validate_subject_key(subject_key: str) -> str:
@@ -79,10 +86,20 @@ def keystore_table(dimension: str) -> str:
     return fqn(catalog_of("curated"), KEYSTORE_SCHEMA, dimension)
 
 
-def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceSpec]) -> ErasurePlan:
-    key = validate_subject_key(subject_key)
-    plan = ErasurePlan(subject_key=key)
-    lit = f"'{key}'"
+def subject_query(request_id: str) -> str:
+    """SQL that yields the subject key of a queued request.
+
+    The key itself never appears in SQL text (query text is archived in the WORM audit trail);
+    statements carry only the opaque request id.
+    """
+    from governance.erasure.queue import queue_table_sql
+
+    return f"select subject_key from {queue_table_sql()} where request_id = '{validate_request_id(request_id)}'"
+
+
+def build_plan(request_id: str, tables: list[TableClass], sources: list[SourceSpec]) -> ErasurePlan:
+    plan = ErasurePlan(request_id=validate_request_id(request_id))
+    subject = subject_query(request_id)
 
     # 1. raw index: every entity that declares person identifiers
     for source in sources:
@@ -92,7 +109,8 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
             table = fqn(catalog_of("raw"), source.name, entity.name)
             name = f"{catalog_of('raw')}.{source.name}.{entity.name}"
             match = " or ".join(
-                f"json_extract_scalar(_subject_keys, '$.{ident(n)[1:-1]}') = {lit}" for n in sorted(entity.identifiers)
+                f"json_extract_scalar(_subject_keys, '$.{ident(n)[1:-1]}') in ({subject})"
+                for n in sorted(entity.identifiers)
             )
             plan.raw_file_queries.append((name, f"select distinct _raw_file from {table} where {match}"))
             plan.steps.append(
@@ -114,7 +132,7 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
             continue
         dim = _by_name(models, t.gdpr["subject_dimension"])
         key_col = ident(t.gdpr["subject_key_column"])
-        keys = f"select surrogate_key from {keystore_table(dim.name)} where business_key = {lit}"
+        keys = f"select surrogate_key from {keystore_table(dim.name)} where business_key in ({subject})"
         target = fqn(t.catalog, t.schema, t.table)
         cols = [ident(c) for c in t.gdpr.get("anonymise_columns", [])]
         statements = ()
@@ -141,7 +159,7 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
         if t.gdpr.get("erasure") != "delete":
             continue
         target = fqn(t.catalog, t.schema, t.table)
-        where = f"{ident(t.gdpr['subject_column'])} = {lit}"
+        where = f"{ident(t.gdpr['subject_column'])} in ({subject})"
         plan.steps.append(
             Step(
                 table=t.key,
@@ -170,20 +188,20 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
             # anonymous placeholders keep facts joinable; they carry no attribute and no business key
             f"insert into {dim} ({sk}, {bk}, is_inferred, is_erased{scd2_cols}) "
             f"select surrogate_key, 'erased:' || cast(surrogate_key as varchar), false, true{scd2_vals} "
-            f"from {ks} where business_key = {lit}",
-            f"delete from {dim} where {bk} = {lit}",
+            f"from {ks} where business_key in ({subject})",
+            f"delete from {dim} where {bk} in ({subject})",
             f"update {ks} set business_key = 'erased:' || cast(surrogate_key as varchar), "
-            f"version_key = 'erased', member_type = 'erased' where business_key = {lit}",
+            f"version_key = 'erased', member_type = 'erased' where business_key in ({subject})",
         )
         plan.steps.append(
             Step(
                 table=t.key,
                 action="keystore",
                 statements=statements,
-                count_sql=f"select count(*) from {dim} where {bk} = {lit}",
+                count_sql=f"select count(*) from {dim} where {bk} in ({subject})",
                 verify_sql=(
-                    f"select (select count(*) from {dim} where {bk} = {lit}) "
-                    f"+ (select count(*) from {ks} where business_key = {lit})"
+                    f"select (select count(*) from {dim} where {bk} in ({subject})) "
+                    f"+ (select count(*) from {ks} where business_key in ({subject}))"
                 ),
             )
         )
@@ -192,8 +210,8 @@ def build_plan(subject_key: str, tables: list[TableClass], sources: list[SourceS
                 table=f"{catalog_of('curated')}.{KEYSTORE_SCHEMA}.{t.name}",
                 action="keystore",
                 statements=(),
-                count_sql=f"select count(*) from {ks} where business_key = {lit}",
-                verify_sql=f"select count(*) from {ks} where business_key = {lit}",
+                count_sql=f"select count(*) from {ks} where business_key in ({subject})",
+                verify_sql=f"select count(*) from {ks} where business_key in ({subject})",
             )
         )
     return plan

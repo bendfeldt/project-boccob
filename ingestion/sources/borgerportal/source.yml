@@ -25,3 +25,4 @@ entities:
   - name: case_types
     description: Reference table of case types, full snapshot as parquet
     format: parquet
+    snapshot: true      # raw index retention keeps the latest delivery

@@ -19,7 +19,7 @@ import yaml
 
 SUPPORTED_FORMATS = ("json", "jsonl", "csv", "xml", "parquet")
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-RESERVED_SOURCE_NAMES = ("iceberg",)  # prefix of the raw index tables in the raw bucket
+RESERVED_SOURCE_NAMES = ("iceberg", "governance")  # raw index prefix; erasure queue namespace
 SOURCES_DIR = Path(__file__).resolve().parent.parent / "sources"
 
 
@@ -35,6 +35,8 @@ class EntitySpec:
     # pseudonym name -> field (dotted path) inside one record that holds a person identifier
     identifiers: Mapping[str, str] = field(default_factory=dict)
     description: str = ""
+    # every delivery is a full snapshot (reference data): retention keeps the latest load indexed
+    snapshot: bool = False
 
     def __post_init__(self) -> None:
         if not _NAME.match(self.name):
@@ -122,6 +124,7 @@ def source_from_dict(doc: Mapping[str, Any]) -> SourceSpec:
                 options=e.get("options") or {},
                 identifiers=e.get("identifiers") or {},
                 description=e.get("description", ""),
+                snapshot=bool(e.get("snapshot", False)),
             )
             for e in doc["entities"]
         )

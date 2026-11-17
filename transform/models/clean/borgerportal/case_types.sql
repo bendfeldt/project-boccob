@@ -1,5 +1,8 @@
 {{ config(materialized='table') }}
 -- Reference data: the newest delivered snapshot (small, rebuilt every run).
+-- "Newest" is decided by the load id (a numeric timestamp string, unique per load), not by
+-- _loaded_at, which is shared by all loads indexed in the same run (catch-up / backfill).
+-- The entity is declared `snapshot: true`, so raw index retention always keeps its latest load.
 with raw as (
   select {{ raw_columns() }}
   from {{ source('raw_borgerportal', 'case_types') }}
@@ -7,7 +10,7 @@ with raw as (
 
 latest as (
   select * from raw
-  where _load_id = (select max_by(_load_id, _loaded_at) from raw)
+  where _load_id = (select max_by(_load_id, cast(_load_id as double)) from raw)
 )
 
 select distinct

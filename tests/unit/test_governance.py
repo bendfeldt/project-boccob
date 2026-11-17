@@ -1,3 +1,4 @@
+import re
 from datetime import date
 
 import pytest
@@ -5,7 +6,7 @@ import pytest
 from governance.classification import manifest as cm
 from governance.config import load_retention
 from governance.erasure.executor import audit_digest
-from governance.erasure.plan import ErasurePlanError, build_plan
+from governance.erasure.plan import ErasurePlanError, build_plan, validate_subject_key
 from governance.erasure.storage_scan import object_contains
 from governance.iceberg import retention_session
 from governance.retention.runner import expired_landing_objects, plan_retention
@@ -13,6 +14,8 @@ from ingestion.framework.spec import load_source
 from lakehouse.trino_client import fqn, ident
 
 KEY = "ab" * 32
+REQ = "0b6f1c2e-6a4d-4c51-9b7e-2f3a4b5c6d7e"
+QUEUE = '(select subject_key from "raw"."governance"."erasure_requests" where request_id = \'' + REQ + "')"
 
 
 def col(pii=None, **meta):
@@ -154,7 +157,7 @@ def test_legacy_top_level_meta_is_read():
 
 
 def test_erasure_plan_covers_all_layers_in_safe_order():
-    plan = build_plan(KEY, cm.tables_from_manifest(GOOD), [load_source("borgerportal")])
+    plan = build_plan(REQ, cm.tables_from_manifest(GOOD), [load_source("borgerportal")])
     actions = [(s.table, s.action) for s in plan.steps]
     assert actions[:3] == [
         ("raw.borgerportal.citizens", "raw_index"),
@@ -170,10 +173,10 @@ def test_erasure_plan_covers_all_layers_in_safe_order():
 
 
 def test_erasure_statements():
-    plan = build_plan(KEY, cm.tables_from_manifest(GOOD), [])
+    plan = build_plan(REQ, cm.tables_from_manifest(GOOD), [])
     by_table = {s.table: s for s in plan.steps}
     assert by_table["clean.borgerportal.citizens"].statements == (
-        f'delete from "clean"."borgerportal"."citizens" where "citizen_id" = \'{KEY}\'',
+        f'delete from "clean"."borgerportal"."citizens" where "citizen_id" in {QUEUE}',
     )
     fact = by_table["curated.borgerservice.fact_payment"].statements[0]
     assert fact.startswith(
@@ -188,7 +191,28 @@ def test_erasure_statements():
 @pytest.mark.parametrize("bad", ["", "abc", "AB" * 32, "ab" * 31 + "'; drop table x --", "zz" * 32])
 def test_subject_key_is_validated(bad):
     with pytest.raises(ErasurePlanError):
+        validate_subject_key(bad)
+
+
+@pytest.mark.parametrize("bad", ["", KEY, REQ.upper(), REQ + "'; drop table x --", "not-a-uuid"])
+def test_request_id_is_validated(bad):
+    with pytest.raises(ErasurePlanError):
         build_plan(bad, [], [])
+
+
+def test_no_subject_key_in_any_sql_text():
+    """H-1: SQL text is archived in the WORM audit trail; statements reference the subject only
+    through the opaque request id."""
+    plan = build_plan(REQ, cm.tables_from_manifest(GOOD), [load_source("borgerportal")])
+    sql = [q for _, q in plan.raw_file_queries]
+    for step in plan.steps:
+        sql += [*step.statements, step.count_sql, step.verify_sql]
+    assert sql
+    for text in sql:
+        assert not re.search(r"[0-9a-f]{64}", text), text
+        assert not re.search(r"\d{6}-?\d{4}", text), text
+    referencing = [t for t in sql if "erasure_requests" in t]
+    assert all(REQ in t for t in referencing) and len(referencing) >= len(plan.steps)
 
 
 def test_audit_digest_does_not_reveal_the_key():
@@ -234,6 +258,10 @@ def test_retention_plan():
         'delete from "clean"."borgerportal"."payments" where cast("payment_date" as date) < date \'2025-06-30\''
     )
     assert "timestamp '2026-04-01 00:00:00 UTC'" in by_table["raw.borgerportal.citizens"]  # 90 days
+    assert "max_by(_load_id" not in by_table["raw.borgerportal.citizens"]
+    assert by_table["raw.borgerportal.case_types"].endswith(
+        'and _load_id <> (select max_by(_load_id, cast(_load_id as double)) from "raw"."borgerportal"."case_types")'
+    ), "the latest reference snapshot is never expired"
     assert plan.landing_cutoff == date(2026, 5, 31)
     assert "clean.borgerportal.citizens" in plan.skipped, "master data has no time based rule"
 
@@ -259,3 +287,49 @@ def test_retention_session_properties():
         retention_session(["raw"], "0s; drop")
     with pytest.raises(ValueError):
         retention_session(["ra w"])
+
+
+# --- object versions (C-1) ---------------------------------------------------------------------
+
+
+def _v(key, vid, minute, latest=False, marker=False):
+    from datetime import UTC, datetime
+
+    from lakehouse.objectstore import ObjectVersion
+
+    return ObjectVersion(key, vid, latest, marker, datetime(2026, 1, 1, 0, minute, tzinfo=UTC))
+
+
+def test_noncurrent_selection_keeps_current_versions():
+    from lakehouse.objectstore import noncurrent_versions
+
+    versions = [
+        _v("live", "a1", 0),
+        _v("live", "a2", 5, latest=True),  # overwritten object
+        _v("gone", "b1", 0),
+        _v("gone", "m1", 3, latest=True, marker=True),  # deleted object
+        _v("only", "c1", 1, latest=True),  # untouched object
+        _v("orphan-marker", "m2", 2, latest=True, marker=True),  # marker without data
+    ]
+    selected = noncurrent_versions(versions)
+    ids = [v.version_id for v in selected]
+    assert set(ids) == {"a1", "b1", "m1", "m2"}
+    assert "a2" not in ids and "c1" not in ids, "current versions are never purged"
+    # data versions are removed before delete markers (never re-expose an old version)
+    assert ids.index("b1") < ids.index("m1")
+
+
+def test_noncurrent_selection_respects_age():
+    from datetime import UTC, datetime
+
+    from lakehouse.objectstore import noncurrent_versions
+
+    versions = [
+        _v("old", "o1", 0),
+        _v("old", "om", 1, latest=True, marker=True),  # noncurrent since minute 1
+        _v("new", "n1", 0),
+        _v("new", "nm", 9, latest=True, marker=True),  # noncurrent since minute 9
+    ]
+    cutoff = datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
+    ids = {v.version_id for v in noncurrent_versions(versions, older_than=cutoff)}
+    assert ids == {"o1", "om"}, "versions inside the recovery window stay, with their marker"
