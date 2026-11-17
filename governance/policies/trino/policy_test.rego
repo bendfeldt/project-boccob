@@ -148,10 +148,69 @@ test_system_runtime_restricted if {
 
 prop(user, groups, catalog, name) := {"context": ctx(user, groups), "action": {"operation": "SetCatalogSessionProperty", "resource": {"catalogSessionProperty": {"catalogName": catalog, "propertyName": name}}}}
 
-test_retention_session_properties_need_write_access if {
+test_retention_floor_only_for_service_accounts if {
 	not allowed(prop("anna", ["analyst"], "curated", "expire_snapshots_min_retention"))
 	allowed(prop("anna", ["analyst"], "curated", "projection_pushdown_enabled"))
-	allowed(prop("erik", ["data-engineer"], "curated", "expire_snapshots_min_retention"))
+	not allowed(prop("erik", ["data-engineer"], "curated", "expire_snapshots_min_retention"))
+	not allowed(prop("erik", ["data-engineer"], "raw", "remove_orphan_files_min_retention"))
+	not allowed(prop("alice", ["platform-admin"], "curated", "expire_snapshots_min_retention"))
+	allowed(prop("erik", ["data-engineer"], "curated", "projection_pushdown_enabled"))
+	allowed(prop("svc-dagster", ["data-engineer", "pii-reader", "lakehouse-service"], "curated", "expire_snapshots_min_retention"))
+	not allowed(prop("svc-dagster", ["lakehouse-service"], "tpch", "expire_snapshots_min_retention"))
+}
+
+svc := ["data-engineer", "pii-reader", "lakehouse-service"]
+
+protected_tables := [
+	["curated", "audit", "erasure_log"],
+	["curated", "keystore", "dim_citizen"],
+	["raw", "governance", "erasure_requests"],
+]
+
+write_ops := ["InsertIntoTable", "DeleteFromTable", "UpdateTableColumns", "TruncateTable", "DropTable", "CreateTable", "ExecuteTableProcedure", "AddColumn"]
+
+test_humans_cannot_write_protected_schemas if {
+	every t in protected_tables {
+		every op in write_ops {
+			every g in [["data-engineer"], ["platform-admin"], ["data-engineer", "pii-reader"], ["auditor"]] {
+				not allowed(table_input("human", g, op, t[0], t[1], t[2]))
+			}
+		}
+	}
+}
+
+test_service_account_writes_protected_schemas if {
+	every t in protected_tables {
+		every op in write_ops {
+			allowed(table_input("svc-dagster", svc, op, t[0], t[1], t[2]))
+		}
+	}
+}
+
+schema_op(user, groups, op, catalog, schema) := {"context": ctx(user, groups), "action": {"operation": op, "resource": {"schema": {"catalogName": catalog, "schemaName": schema}}}}
+
+test_protected_schema_ddl_only_for_service if {
+	not allowed(schema_op("erik", ["data-engineer"], "DropSchema", "curated", "audit"))
+	not allowed(schema_op("alice", ["platform-admin"], "DropSchema", "curated", "keystore"))
+	not allowed(schema_op("erik", ["data-engineer"], "CreateSchema", "raw", "governance"))
+	allowed(schema_op("svc-dagster", svc, "CreateSchema", "curated", "audit"))
+	allowed(schema_op("erik", ["data-engineer"], "CreateSchema", "curated", "borgerservice"))
+}
+
+test_protected_schema_reads if {
+	allowed(table_input("axel", ["auditor"], "SelectFromColumns", "curated", "audit", "erasure_log"))
+	allowed(table_input("axel", ["auditor"], "SelectFromColumns", "raw", "governance", "erasure_requests"))
+	not allowed(table_input("erik", ["data-engineer"], "SelectFromColumns", "curated", "audit", "erasure_log"))
+	not allowed(table_input("erik", ["data-engineer"], "SelectFromColumns", "raw", "governance", "erasure_requests"))
+	allowed(table_input("erik", ["data-engineer"], "SelectFromColumns", "curated", "keystore", "dim_citizen"))
+	allowed(table_input("alice", ["platform-admin"], "SelectFromColumns", "curated", "audit", "erasure_log"))
+	not allowed(table_input("anna", ["analyst"], "SelectFromColumns", "curated", "keystore", "dim_citizen"))
+}
+
+test_engineer_still_writes_unprotected_schemas if {
+	allowed(table_input("erik", ["data-engineer"], "InsertIntoTable", "curated", "borgerservice", "fact_payment"))
+	allowed(table_input("erik", ["data-engineer"], "InsertIntoTable", "raw", "borgerportal", "citizens"))
+	allowed(table_input("alice", ["platform-admin"], "DropTable", "clean", "borgerportal", "citizens"))
 }
 
 # --- column masking -------------------------------------------------------------------------

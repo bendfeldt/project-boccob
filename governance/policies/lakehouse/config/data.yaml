@@ -4,47 +4,61 @@ admin_group: platform-admin
 pii_group: pii-reader            # members see classified columns unmasked
 pii_levels_masked: [direct, sensitive]
 
+# Pipeline service accounts (svc-dagster). The only principals that may write the protected
+# schemas (keystore, erasure audit log, erasure queue) or lower the snapshot/orphan retention floor.
+service_group: lakehouse-service
+
 # Everybody holding one of these groups may run queries at all.
-known_groups: [platform-admin, data-engineer, analyst, pii-reader, auditor]
+known_groups: [platform-admin, data-engineer, analyst, pii-reader, auditor, lakehouse-service]
 
 # Read-only observers of query history (system.runtime, other users' queries).
 query_observers: [platform-admin, auditor]
 
-# One Trino catalog per layer. read/write = groups; platform-admin is always allowed.
+# One Trino catalog per layer. read/write = groups; platform-admin is always allowed, except for
+# writes to schemas marked `protected: true` (only their own `write` list applies there).
 # unclassified: how columns without a classification are treated for users without the pii group
 #   mask  -> NULL (classification is mandatory; unknown is treated as personal data)
 #   allow -> visible
 catalogs:
   raw:
     layer: raw
-    read: [data-engineer, auditor]
-    write: [data-engineer]
+    read: [data-engineer, auditor, lakehouse-service]
+    write: [data-engineer, lakehouse-service]
     unclassified: allow
+    schemas:
+      governance:                  # erasure request queue (pseudonymised keys of erasure subjects)
+        protected: true
+        read: [auditor, lakehouse-service]
+        write: [lakehouse-service]
     # the raw index is schema-on-read: the whole record and the subject keys are personal data
     column_defaults:
       payload: {pii: direct, mask: "null"}
       _subject_keys: {pii: indirect}
   clean:
     layer: clean
-    read: [data-engineer, auditor]
-    write: [data-engineer]
+    read: [data-engineer, auditor, lakehouse-service]
+    write: [data-engineer, lakehouse-service]
     unclassified: mask
   consolidated:
     layer: consolidated
-    read: [data-engineer, auditor]
-    write: [data-engineer]
+    read: [data-engineer, auditor, lakehouse-service]
+    write: [data-engineer, lakehouse-service]
     unclassified: mask
   curated:
     layer: curated
-    read: [data-engineer, analyst, auditor]
-    write: [data-engineer]
+    read: [data-engineer, analyst, auditor, lakehouse-service]
+    write: [data-engineer, lakehouse-service]
     unclassified: mask
     schemas:                       # schema level overrides
-      keystore:
-        read: [data-engineer, auditor]
+      keystore:                    # surrogate keys: written only by the pipeline (key stability)
+        protected: true
+        read: [data-engineer, auditor, lakehouse-service]
+        write: [lakehouse-service]
         unclassified: allow
-      audit:
-        read: [data-engineer, auditor]
+      audit:                       # erasure log: accountability evidence, append only by the pipeline
+        protected: true
+        read: [auditor, lakehouse-service]
+        write: [lakehouse-service]
         unclassified: allow
       dbt_test_audit:
         read: [data-engineer]

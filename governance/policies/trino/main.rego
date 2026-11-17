@@ -61,10 +61,16 @@ catalog_access(catalog, "read") if {
 	g in groups
 }
 
-schema_access(catalog, _, _) if {
+schema_access(catalog, schema, mode) if {
 	is_admin
 	catalog in object.keys(config.catalogs)
+	not protected_write(catalog, schema, mode)
 }
+
+# protected schemas: writes only through their own write list (no admin bypass)
+protected_write(catalog, schema, "write") if schema_config(catalog, schema).protected == true
+
+is_service if config.service_group in groups
 
 schema_access(catalog, schema, mode) if {
 	some g in allowed_groups(catalog, schema, mode)
@@ -139,9 +145,13 @@ allow if {
 	not retention_override(resource.catalogSessionProperty.propertyName)
 }
 
+# lowering the snapshot / orphan file retention floor makes deleted data unrecoverable at once:
+# reserved for the pipeline service accounts (maintenance and erasure jobs)
 allow if {
 	operation == "SetCatalogSessionProperty"
-	catalog_access(resource.catalogSessionProperty.catalogName, "write")
+	retention_override(resource.catalogSessionProperty.propertyName)
+	is_service
+	resource.catalogSessionProperty.catalogName in object.keys(config.catalogs)
 }
 
 retention_override(name) if name in {"expire_snapshots_min_retention", "remove_orphan_files_min_retention"}

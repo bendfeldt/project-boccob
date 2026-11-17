@@ -3,3 +3,4 @@ data-engineer:erik-engineer,svc-dagster
 analyst:anna-analyst,petra-pii
 pii-reader:petra-pii,svc-dagster
 auditor:axel-auditor
+lakehouse-service:svc-dagster
