@@ -37,6 +37,10 @@ def test_second_delivery_contains_changes_tombstones_and_late_members():
     # citizens whose payments came first and whose master data arrives one delivery later
     paid_first = {p["cpr"] for p in first.payments} - first_cprs
     assert paid_first and paid_first <= second_cprs
+    # ...with two states, both effective before the payment that was delivered first
+    for cpr in paid_first:
+        states = sorted(c["updated_at"] for c in second.citizens if c["cpr"] == cpr)
+        assert len(states) >= 2 and states[-1][:10] < first.business_date.isoformat()
     # late arriving facts: payment dated before the delivery's business date
     assert any(p["payment_date"] != second.business_date.strftime("%d-%m-%Y") for p in second.payments)
     assert len(second.case_types) == len(first.case_types) + 1

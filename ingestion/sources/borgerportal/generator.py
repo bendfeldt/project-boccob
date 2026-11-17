@@ -7,7 +7,9 @@ is genuinely exercised:
 * citizens move / change e-mail between deliveries (SCD2 versions), some are deleted (tombstones)
 * payments arrive late (payment date before earlier deliveries)
 * some payments reference a citizen whose master record is delivered one batch later
-  (late-arriving dimension member -> inferred member in the keystore)
+  (late-arriving dimension member -> inferred member in the keystore); that record arrives with
+  two states whose effective dates lie before the payment, so the payment belongs to the second
+  version, not to the first one that adopts the inferred key
 * a few records are delivered twice in a file (dedupe in clean)
 
 All persons are invented. CPR numbers are shaped like ``DDMMYY-SSSS`` but the day part is offset by
@@ -237,11 +239,20 @@ def _step(world: World, sequence: int, n_citizens: int) -> Batch:
     out_payments: list[dict] = []
 
     # master records held back in the previous delivery arrive now (late-arriving dimension members)
+    # They come with their recent history: the source's change log has an earlier address and the
+    # current one, both effective *before* the facts that were delivered without them.
     for c in world.citizens.values():
         if not c.delivered:
             c.delivered = True
-            c.updated_at = _ts(day, rng)
-            out_citizens.append(_citizen_record(c))
+            previous = _citizen_record(c)
+            previous["address"] = {
+                **previous["address"],
+                "street": rng.choice(STREETS),
+                "house_no": str(rng.randrange(1, 180)),
+            }
+            previous["updated_at"] = _ts(day - timedelta(days=10), rng)
+            c.updated_at = _ts(day - timedelta(days=3), rng)
+            out_citizens.extend([previous, _citizen_record(c)])
 
     if sequence == 1:
         new_count, held_back = n_citizens, max(2, n_citizens // 50)
