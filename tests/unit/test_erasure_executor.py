@@ -3,6 +3,7 @@ one failure does not stop the batch, the audit row is asserted, dry runs do not 
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -155,3 +156,39 @@ def test_storage_scan_skips_excluded_prefixes(monkeypatch):
     monkeypatch.setattr(objectstore, "read_version", lambda fs, bucket, v: b"... needle ...")
     hits = storage_scan.scan_storage(None, ["lakehouse-raw"], ["needle"], exclude=[QUEUE_LOCATION])
     assert hits == ["s3://lakehouse-raw/iceberg/clean/t/data/b.parquet?versionId=1"]
+
+
+def test_dry_run_reads_only_and_never_puts_the_key_in_sql(monkeypatch):
+    """N-8: a dry run writes nothing (no queue row, no history purge) and its SQL carries only a
+    two character key prefix; the rows are matched in Python."""
+    from governance.classification import manifest as cm
+    from ingestion.framework.spec import load_source
+    from tests.unit.test_governance import GOOD
+
+    other = "ab" + "cd" * 31  # same prefix, other subject
+    monkeypatch.setattr(ex, "pseudonym_pepper", lambda: "p" * 32)
+    monkeypatch.setattr(ex.cm, "load_manifest", lambda path: GOOD)
+    monkeypatch.setattr(ex, "list_sources", lambda: [load_source("borgerportal")])
+    monkeypatch.setattr(ex.rq, "enqueue", lambda *a, **k: pytest.fail("a dry run must not write the queue"))
+    key = "ab" * 32
+
+    class ReadOnlyTrino(FakeTrino):
+        def execute(self, sql, params=None):
+            assert sql.lstrip().lower().startswith("select"), f"dry run issued a write: {sql}"
+            self.statements.append(sql)
+            if "_raw_file" in sql:  # raw index: (cpr key, file, count)
+                return [[key, "f1.json", 2], [other, "f2.json", 5]]
+            return [[key, 3], [other, 7]]
+
+    trino = ReadOnlyTrino()
+    report = ex.erase_subject(subject_key=key, requested_by="dpo", reason="preview", dry_run=True, trino=trino)
+    assert report.dry_run and report.status == "planned"
+    assert report.rows["clean.borgerportal.citizens [delete]"] == 3
+    assert report.rows["raw.borgerportal.citizens [raw_index]"] == 2
+    assert report.rows["curated.borgerservice.fact_payment [anonymise]"] == 3
+    assert report.rows["curated.keystore.dim_citizen [keystore]"] == 3
+    assert report.raw_files == ["f1.json"]
+    assert trino.statements and len(cm.tables_from_manifest(GOOD)) > 0
+    for sql in trino.statements:
+        assert key not in sql and not re.search(r"[0-9a-f]{64}", sql) and "erasure_requests" not in sql
+        assert "'ab'" in sql

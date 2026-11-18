@@ -127,7 +127,9 @@ ERASURE_IDENTIFIER=<cpr> lakehouse-erase --requested-by dpo@... --reason "case 4
 `--submit` queues the request: only the pseudonymised key is stored, in `raw.governance.erasure_requests`
 (written with pyiceberg, readable by auditors and the pipeline only); the Dagster job `erasure` executes
 the queue at night under the writer pool. Without `--submit` the request is queued and executed
-immediately; a dry run queues, counts and removes the request again. The identifier is read from the
+immediately. A dry run (`--dry-run`, `make erase-dry-run`) only reads: it writes no queue row and
+needs no write permission; its queries select the subjects whose key starts with the same two hex
+characters (8 bits, identifies nobody) and the rows are matched in Python. The identifier is read from the
 environment or stdin, never from the command line, and never enters Dagster run configuration or events.
 
 **No identifier in SQL.** Trino query text is archived (WORM) by the platform, so anything in it can
@@ -156,18 +158,27 @@ What happens, in order (`governance/erasure/plan.py`, derived from dbt meta and 
    subject's key or CPR number); a table that became empty is replaced by itself for the same
    reason; `expire_snapshots` and `remove_orphan_files` with zero retention then remove every
    older data file, delete file and manifest.
-9. Verification in SQL: every planned table is queried again (through the queued key). Then the
-   request is removed from the queue and the queue's history is purged as in step 8.
+9. Verification in SQL: every planned table is queried again (through the queued key).
 10. Object versions: on a versioned bucket every file deleted in steps 2-9 is still readable by
     version id. All noncurrent versions and delete markers in the four lakehouse buckets are removed
     (`PURGE_S3_*` credentials with `s3:DeleteObjectVersion`); the job fails rather than report success
     if it lacks the permission. This also ends the object-version recovery window for unrelated
     deleted files - Iceberg never overwrites files, so only already deleted objects are affected.
 11. With `--verify-storage` / `ERASURE_VERIFY_STORAGE` every object *version* in the four buckets is
-    decoded (Parquet, Avro manifests, text) and searched for the identifier and the key.
+    decoded (Parquet, Avro manifests, text) and searched for the identifier and the key. The files of
+    the request queue are skipped: they still hold the key, by design, until step 13.
 12. An audit row is written to `curated.audit.erasure_log`: erasure id, who requested it, reason,
     status, executing principal, affected tables and counts, and a keyed digest of the subject
     (lets the controller later prove that a given identifier was erased; identifies nobody by itself).
+    The insert must report exactly one row; otherwise the erasure counts as failed.
+13. Only now is the request removed from the queue; the queue's history is purged as in step 8 and
+    its noncurrent object versions as in step 10.
+
+**Failures never lose a request.** If any step fails, the request stays in the queue with
+`status = 'failed'` and an incremented `attempts`; the key is kept, so the next run retries it
+without the DPO resubmitting the identifier (every step is idempotent). A failed attempt is audited
+as `failed`. The nightly job processes every queued request even when one fails, and then fails
+itself, listing the failed request ids (no identifiers) - this is the operator's alert.
 
 Limits and operating rules:
 

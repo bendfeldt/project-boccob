@@ -215,3 +215,78 @@ def build_plan(request_id: str, tables: list[TableClass], sources: list[SourceSp
             )
         )
     return plan
+
+
+# --- dry run ---------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class PreviewQuery:
+    """Read-only count for a dry run. ``sql`` returns rows ``(k_1, ..., k_n, [_raw_file,] count)``
+    for every subject whose key starts with a two-character prefix; the caller keeps the rows
+    where one of ``k_1..k_n`` equals the key. Neither the key nor the queue appear in SQL."""
+
+    label: str  # "<table> [<action>]", same as the execution report
+    table: str
+    sql: str
+    key_columns: int
+    with_files: bool = False
+
+
+def build_preview(tables: list[TableClass], sources: list[SourceSpec], subject_key: str) -> list[PreviewQuery]:
+    """Dry-run counts without writing anything (no queue row): the subject is selected by the
+    first two hex characters of its key (8 bits, identifies nobody) and matched in Python."""
+    prefix = validate_subject_key(subject_key)[:2]
+
+    def starts(expr: str) -> str:
+        return f"substr({expr}, 1, 2) = '{prefix}'"
+
+    out: list[PreviewQuery] = []
+    for source in sources:
+        for entity in source.entities:
+            if not entity.identifiers:
+                continue
+            table = fqn(catalog_of("raw"), source.name, entity.name)
+            exprs = [f"json_extract_scalar(_subject_keys, '$.{ident(n)[1:-1]}')" for n in sorted(entity.identifiers)]
+            cols = ", ".join(exprs)
+            name = f"{catalog_of('raw')}.{source.name}.{entity.name}"
+            out.append(
+                PreviewQuery(
+                    label=f"{name} [raw_index]",
+                    table=name,
+                    sql=f"select {cols}, _raw_file, count(*) from {table} "
+                    f"where {' or '.join(starts(e) for e in exprs)} group by {cols}, _raw_file",
+                    key_columns=len(exprs),
+                    with_files=True,
+                )
+            )
+    models = [t for t in tables if t.resource_type == "model"]
+    order = {"clean": 0, "consolidated": 1, "curated": 2}
+    for t in sorted(models, key=lambda t: order.get(t.layer or "", 9)):
+        erasure = t.gdpr.get("erasure")
+        target = fqn(t.catalog, t.schema, t.table)
+        if erasure == "anonymise":
+            dim = _by_name(models, t.gdpr["subject_dimension"])
+            key_col = ident(t.gdpr["subject_key_column"])
+            sql = (
+                f"select k.business_key, count(*) from {target} f join {keystore_table(dim.name)} k "
+                f"on f.{key_col} = k.surrogate_key where {starts('k.business_key')} group by 1"
+            )
+            out.append(PreviewQuery(f"{t.key} [anonymise]", t.key, sql, 1))
+        elif erasure == "delete":
+            subject = ident(t.gdpr["subject_column"])
+            sql = f"select {subject}, count(*) from {target} where {starts(subject)} group by 1"
+            out.append(PreviewQuery(f"{t.key} [delete]", t.key, sql, 1))
+        elif erasure == "keystore":
+            bk = ident(_dimension_settings(t)["business_key"])
+            sql = f"select {bk}, count(*) from {target} where {starts(bk)} group by 1"
+            out.append(PreviewQuery(f"{t.key} [keystore]", t.key, sql, 1))
+            ks_name = f"{catalog_of('curated')}.{KEYSTORE_SCHEMA}.{t.name}"
+            out.append(
+                PreviewQuery(
+                    f"{ks_name} [keystore]",
+                    ks_name,
+                    f"select business_key, count(*) from {keystore_table(t.name)} "
+                    f"where {starts('business_key')} group by 1",
+                    1,
+                )
+            )
+    return out

@@ -43,6 +43,7 @@ from governance.erasure.plan import (
     KEYSTORE_SCHEMA,
     ErasurePlan,
     build_plan,
+    build_preview,
     subject_query,
     validate_request_id,
     validate_subject_key,
@@ -232,7 +233,6 @@ def execute_request(
     reason: str,
     scope: str = "full",
     identifier: str | None = None,
-    dry_run: bool = False,
     verify_storage: bool = False,
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
@@ -246,7 +246,7 @@ def execute_request(
     report = ErasureReport(
         erasure_id=str(uuid.uuid4()),
         subject_digest=audit_digest(key, pepper),
-        dry_run=dry_run,
+        dry_run=False,
         request_id=validate_request_id(request_id),
     )
     trino = _session(trino)
@@ -266,8 +266,6 @@ def execute_request(
             files.update(r[0] for r in trino.execute(sql))
     report.raw_files = sorted(files)
     baselines = _baseline_tables(trino)
-    if dry_run:
-        return report
 
     audit_table = _ensure_audit_table(trino)
     rq.stage_digest(report.erasure_id, report.subject_digest)
@@ -345,6 +343,28 @@ def execute_request(
     return report
 
 
+def preview(subject_key: str, *, trino: TrinoClient | None = None) -> ErasureReport:
+    """Dry run: what an erasure would remove, read-only. Nothing is queued or written (no
+    service-group write needed); query texts carry only a two-character key prefix."""
+    key = validate_subject_key(subject_key)
+    report = ErasureReport(erasure_id="dry-run", subject_digest=audit_digest(key, pseudonym_pepper()), dry_run=True)
+    trino = trino or TrinoClient(source="lakehouse-erasure")
+    tables = cm.tables_from_manifest(cm.load_manifest(manifest_path()))
+    files: set[str] = set()
+    for q in build_preview(tables, list_sources(), key):
+        if not _table_exists(trino, q.table):
+            continue
+        count = 0
+        for row in trino.execute(q.sql):
+            if key in row[: q.key_columns]:
+                count += int(row[-1])
+                if q.with_files:
+                    files.add(row[q.key_columns])
+        report.rows[q.label] = count
+    report.raw_files = sorted(files)
+    return report
+
+
 def erase_subject(
     *,
     identifier: str | None = None,
@@ -357,29 +377,25 @@ def erase_subject(
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
 ) -> ErasureReport:
-    """Immediate erasure (CLI): stage the request, execute it. A dry run removes its request again."""
+    """Immediate erasure (CLI): stage the request, execute it. A dry run only reads (preview)."""
     if bool(identifier) == bool(subject_key):
         raise ValueError("give exactly one of identifier / subject_key")
     key = validate_subject_key(subject_key or pseudonymise(identifier, pseudonym_pepper()))
+    if dry_run:
+        return preview(key, trino=trino)
     id_type = identifier_type if identifier else "subject_key"
     request_id = rq.enqueue(key, identifier_type=id_type, requested_by=requested_by, reason=reason)
-    trino = _session(trino)
-    try:
-        return execute_request(
-            request_id,
-            subject_key=key,
-            identifier=identifier,
-            identifier_type=id_type,
-            requested_by=requested_by,
-            reason=reason,
-            dry_run=dry_run,
-            verify_storage=verify_storage,
-            trino=trino,
-            s3=s3,
-        )
-    finally:
-        if dry_run:
-            _dequeue(trino, request_id)
+    return execute_request(
+        request_id,
+        subject_key=key,
+        identifier=identifier,
+        identifier_type=id_type,
+        requested_by=requested_by,
+        reason=reason,
+        verify_storage=verify_storage,
+        trino=_session(trino),
+        s3=s3,
+    )
 
 
 def process_pending_requests(
