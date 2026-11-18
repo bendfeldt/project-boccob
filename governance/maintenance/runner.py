@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from governance import iceberg
 from governance.config import RetentionConfig, catalog_of, load_retention
 from lakehouse.objectstore import purge_noncurrent
-from lakehouse.settings import LAYERS, S3Settings, layer_bucket
+from lakehouse.settings import LAYERS, S3Settings, layer_bucket, noncurrent_grace_days
 from lakehouse.trino_client import TrinoClient
 
 log = logging.getLogger(__name__)
@@ -67,13 +67,16 @@ def run_maintenance(
                     report.failed.append({"table": str(table), "operation": op, "error": str(exc)[:500]})
     if "purge_noncurrent_versions" in operations and schema is None:
         # Files removed by expire_snapshots / remove_orphan_files / DROP TABLE stay readable as
-        # noncurrent versions on a versioned bucket. They are removed once they have been
-        # noncurrent for longer than the layer's orphan file retention (the recovery window).
+        # noncurrent versions on a versioned bucket - the deletion safety window. They are removed
+        # once noncurrent for longer than NONCURRENT_VERSION_GRACE_DAYS (default 7, same as the
+        # bucket lifecycle), or the layer's orphan file retention if that is longer.
         purge_s3 = S3Settings.for_purge()
         fs = purge_s3.filesystem()
+        grace = timedelta(days=noncurrent_grace_days())
         for layer in layers:
             bucket = purge_s3.raw_bucket if layer == "raw" else layer_bucket(layer)
-            cutoff = datetime.now(UTC) - timedelta(seconds=duration_seconds(config.layers[layer].orphan_file_retention))
+            orphan = timedelta(seconds=duration_seconds(config.layers[layer].orphan_file_retention))
+            cutoff = datetime.now(UTC) - max(grace, orphan)
             try:
                 removed = purge_noncurrent(fs, bucket, older_than=cutoff)
                 report.done.append(

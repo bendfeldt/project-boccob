@@ -116,14 +116,15 @@ to a mounted file; the dbt profile reads plain variables only.
 | `TRINO_CA_BUNDLE` / `LAKEHOUSE_CA_BUNDLE` | | system trust | path of the internal CA bundle (Trino client, s3fs, pyiceberg REST) |
 | `PSEUDONYM_PEPPER` | **yes** | | >= 32 characters; key of the HMAC pseudonymisation. Losing it breaks key continuity, leaking it weakens pseudonymisation - store in OpenBao, back it up, never rotate without a re-index plan (docs/gdpr.md) |
 | `DBT_THREADS` | | `4` | dbt concurrency |
-| `LAKEHOUSE_ENV` | | (unset = production rules) | **new** - `dev`, `test` or `prod`. Only `dev` permits `dbt --full-refresh` of incremental models (docs/releases.md); set it per environment |
+| `LAKEHOUSE_ENV` | | (unset = production rules) | `dev`, `test` or `prod` (as deployed: provided per environment). Only `dev` permits `dbt --full-refresh` of incremental models (docs/releases.md) |
 | `SCHEDULES_ENABLED` | | `false` | start schedules automatically |
 | `SCHEDULE_TIMEZONE` | | `Europe/Copenhagen` | |
 | `INGEST_START_DATE` | | `2026-01-01` | first daily partition |
-| `PURGE_S3_ACCESS_KEY_ID` | yes | `S3_ACCESS_KEY_ID` | **new** - key allowed to remove object versions: `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetObject`, `s3:GetObjectVersion`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on all four lakehouse buckets. Used by erasure, retention and maintenance; without it they fail (by design) on versioned buckets instead of leaving data behind |
+| `PURGE_S3_ACCESS_KEY_ID` | yes | `S3_ACCESS_KEY_ID` | key allowed to remove object versions: `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetObject`, `s3:GetObjectVersion`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on all four lakehouse buckets. Used by erasure (immediate, touched locations only) and maintenance (after the safety window); without it they fail (by design) on versioned buckets instead of leaving data behind. As deployed: only in the Secret named by `PURGE_CREDENTIALS_SECRET` |
+| `NONCURRENT_VERSION_GRACE_DAYS` | | `7` | deletion safety window: maintenance removes noncurrent object versions only after this many days (or the layer's orphan retention, if longer). Set it equal to the bucket lifecycle `lakehouse_noncurrent_version_days` |
 | `PURGE_S3_SECRET_ACCESS_KEY` | yes | | |
 | `ERASURE_VERIFY_STORAGE` | | `false` | object scan after an erasure: `scoped` = every object version under the locations of the touched tables and the subject's raw files (cost grows with those tables; recommended for test/prod); `full` (or `true`) = every version of the four lake buckets, O(lake) per request - for audits and small lakes only; `false` = SQL verification only |
-| `PURGE_CREDENTIALS_SECRET` | | (unset) | **new** - name of a Kubernetes Secret with `PURGE_S3_ACCESS_KEY_ID` / `PURGE_S3_SECRET_ACCESS_KEY`. When set, the jobs `erasure`, `retention` and `iceberg_maintenance` add it to their run pods (`dagster-k8s/config` tag, `env_from`), so the purge credential can be removed from the environment shared by every run (audit N-3). Must be set on the code location deployment |
+| `PURGE_CREDENTIALS_SECRET` | | (unset) | name of a Kubernetes Secret with `PURGE_S3_ACCESS_KEY_ID` / `PURGE_S3_SECRET_ACCESS_KEY` (as deployed: `lakehouse-purge-env`, set on the code location). The jobs `erasure`, `retention` and `iceberg_maintenance` add it to their run pods (`dagster-k8s/config` tag, `env_from`); no other run gets the purge credential (audit N-3) |
 | `INGEST_<SOURCE>_<OPTION>` | | source.yml | per-source option overrides |
 
 For TLS with the internal CA also set the generic variables honoured by the underlying libraries:
@@ -141,11 +142,12 @@ the harness files in `tests/integration/` are a working reference configuration.
 **Object storage (RustFS)**
 * Buckets `lakehouse-raw`, `lakehouse-clean`, `lakehouse-consolidated`, `lakehouse-curated`.
 * No object lock on the lakehouse buckets: erasure and retention must be able to delete object versions.
-* Versioning may be on (it is on the platform). The solution does not rely on lifecycle rules: erasure
-  removes every noncurrent version and delete marker in the four buckets; the maintenance job
-  (`purge_noncurrent_versions`) removes versions that have been noncurrent for longer than the layer's
-  orphan file retention (`governance/retention.yml`); retention deletes landing files with all versions.
-  A platform lifecycle with `NoncurrentVersionExpiration` is a welcome second line of defence.
+* Versioning may be on (it is on the platform), with a lifecycle `NoncurrentVersionExpiration` of
+  `lakehouse_noncurrent_version_days` (default 7): the deletion safety window. The solution keeps it:
+  maintenance (`purge_noncurrent_versions`) removes only versions noncurrent for longer than
+  `NONCURRENT_VERSION_GRACE_DAYS` (set it to the same value) or the layer's orphan file retention,
+  whichever is longer; retention deletes only current versions. Only the erasure purges at once, and
+  only under the locations of the tables it touched and the subject's raw files (docs/gdpr.md).
 
 **Polaris**
 * One internal catalog per layer, named as the layer, with
@@ -173,17 +175,18 @@ the harness files in `tests/integration/` are a working reference configuration.
 
 **Dagster**
 * User code deployment from the image; run launcher pods with the same image and environment.
-* Compute logs: run pods log to stdout. The image contains `dagster-aws` (pinned with the other
-  Dagster packages), so the instance may use `dagster_aws.s3.compute_log_manager.S3ComputeLogManager`
-  (e.g. bucket `platform-logs`, `endpoint_url` = RustFS, credentials from the environment, CA bundle via
-  `AWS_CA_BUNDLE`). The webserver/daemon image of the platform needs the same package to read them.
-  Compute logs can contain whatever a step prints; the solution never prints identifiers, but the
-  bucket still needs the platform's log retention.
+* Compute logs: the image contains `dagster-aws` (pinned with the other Dagster packages); as deployed
+  the instance uses `dagster_aws.s3.compute_log_manager.S3ComputeLogManager` with the bucket
+  `dagster-compute-logs` and its own S3 user (not `platform-logs`, not a lake credential), RustFS as
+  `endpoint_url`, CA bundle via `AWS_CA_BUNDLE`. The webserver/daemon image needs the same package to
+  read them. Compute logs contain whatever a step prints; the solution never prints identifiers,
+  but the bucket still needs its own retention.
 * Pool `lakehouse_writer` limited to 1.
 * Egress (NetworkPolicy) from the orchestration namespace to Trino, Polaris, RustFS and the Dagster database.
 
 **Secrets (OpenBao KV -> ESO -> Secret -> env)**
-`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `PURGE_S3_ACCESS_KEY_ID`, `PURGE_S3_SECRET_ACCESS_KEY`,
+`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `PURGE_S3_ACCESS_KEY_ID`, `PURGE_S3_SECRET_ACCESS_KEY` (purge
+pair only in the Secret `PURGE_CREDENTIALS_SECRET` names),
 `POLARIS_CLIENT_ID`, `POLARIS_CLIENT_SECRET`, `TRINO_PASSWORD` or `TRINO_JWT_TOKEN`, `PSEUDONYM_PEPPER`.
 
 **Audit**

@@ -182,6 +182,18 @@ class TrinoSettings:
         )
 
 
+def noncurrent_grace_days() -> int:
+    """``NONCURRENT_VERSION_GRACE_DAYS`` (default 7): how long a deleted or overwritten object stays
+    recoverable as a noncurrent version before maintenance removes it. It should equal the
+    platform's bucket lifecycle (``lakehouse_noncurrent_version_days``); only the erasure purges
+    earlier, and only where the subject's data was."""
+    value = env("NONCURRENT_VERSION_GRACE_DAYS", "7")
+    days = int(value)
+    if days < 0:
+        raise ValueError("NONCURRENT_VERSION_GRACE_DAYS must be >= 0")
+    return days
+
+
 def pseudonym_pepper() -> str:
     """Secret pepper for keyed pseudonymisation (HMAC-SHA256). Runtime only, never in git."""
     pepper = env("PSEUDONYM_PEPPER", required=True)

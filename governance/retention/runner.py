@@ -12,7 +12,6 @@ from governance.classification import manifest as cm
 from governance.config import RetentionConfig, catalog_of, load_retention, manifest_path
 from ingestion.framework.manifest import MANIFEST_TABLE, load_date_of
 from ingestion.framework.spec import SourceSpec, list_sources
-from lakehouse.objectstore import delete_permanently
 from lakehouse.settings import S3Settings
 from lakehouse.trino_client import TrinoClient, fqn, ident
 
@@ -171,7 +170,6 @@ def run_retention(
     trino = trino or TrinoClient(source="lakehouse-retention")
     s3 = s3 or S3Settings.from_env()
     fs = s3.filesystem()
-    purge_fs = S3Settings.for_purge().filesystem()  # removes every version, not only the current one
     report: dict[str, Any] = {
         "dry_run": dry_run,
         "date": today.isoformat(),
@@ -210,8 +208,10 @@ def run_retention(
                 if date.fromisoformat(load_date_of(k.rsplit("/", 1)[1].rsplit(".", 2)[0])) < plan.landing_cutoff
             ]
         report["landing_objects"] += len(expired)
-        if not dry_run:
-            for key in expired:
-                delete_permanently(purge_fs, s3.raw_bucket, key)
+        if not dry_run and expired:
+            # a plain delete: on a versioned bucket the file stays recoverable as a noncurrent version
+            # for the deletion safety window (NONCURRENT_VERSION_GRACE_DAYS / bucket lifecycle), then
+            # maintenance or the lifecycle removes it. Only the erasure removes versions at once.
+            fs.rm([f"{s3.raw_bucket}/{key}" for key in expired])
     log.info("retention %s", report)
     return report

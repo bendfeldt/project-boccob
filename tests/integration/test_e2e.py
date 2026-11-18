@@ -175,6 +175,15 @@ def noncurrent_hits(fs, buckets: list[str], needles: list[str]) -> list[str]:
     return hits
 
 
+def expire_safety_window() -> None:
+    """What the bucket lifecycle / maintenance do once NONCURRENT_VERSION_GRACE_DAYS have passed."""
+    from lakehouse.objectstore import purge_noncurrent
+
+    purge_fs = S3Settings.for_purge().filesystem()
+    for bucket in BUCKETS:
+        purge_noncurrent(purge_fs, bucket)
+
+
 def erasure_query_texts(trino: TrinoClient) -> list[str]:
     """Query texts of the governance tooling, read as the auditor (svc-dagster may not see them)."""
     auditor = TrinoClient(user="axel-auditor")
@@ -558,9 +567,14 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     events = json.dumps([str(e.event_specific_data) for e in result.all_events])
     assert cpr not in events and key not in events, "no identifier may leak into orchestrator events"
 
-    # physically gone: no object version (current or noncurrent) contains the CPR number or the pseudonym
+    # physically gone from every current object and from every version under the touched tables;
+    # what is left are noncurrent copies elsewhere (e.g. tables dropped in test_04, re-created at a new
+    # location) that the deletion safety window expires - the erasure keeps that window for the rest
+    # of the lake. Simulate the lifecycle / maintenance after the window, then nothing remains.
+    left = set(scan_storage(fs, BUCKETS, [cpr, key]))
+    assert left <= set(noncurrent_hits(fs, BUCKETS, [cpr, key])), "only noncurrent copies may remain"
+    expire_safety_window()
     assert scan_storage(fs, BUCKETS, [cpr, key]) == []
-    assert all(not v.is_delete_marker or v.is_latest for b in BUCKETS for v in iter_versions(fs, b))
     assert all(v.is_latest for b in BUCKETS for v in iter_versions(fs, b)), "no noncurrent version survives"
     # H-1: no query issued by the erasure tooling carries the identifier or the pseudonym
     texts = erasure_query_texts(trino)
@@ -738,6 +752,9 @@ def test_10_deregistration_erasure_keeps_bookkeeping_anonymised(trino, fs):
         f"from clean.borgerportal.cases where case_id in ({ids})"
     )
     assert kept == [[len(cases), 0, len(cases)]]
+    left = set(scan_storage(fs, BUCKETS, [key]))
+    assert left <= set(noncurrent_hits(fs, BUCKETS, [key])), "only noncurrent copies may remain"
+    expire_safety_window()
     assert scan_storage(fs, BUCKETS, [key]) == []
     audit = trino.execute("select status, details from curated.audit.erasure_log where reason like 'test (request %'")
     assert len(audit) == 1 and audit[0][0] == "completed" and '"scope": "deregistration"' in audit[0][1]

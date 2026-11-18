@@ -74,6 +74,8 @@ def scan_storage(
     needles: list[str],
     exclude: list[str] | None = None,
     prefixes: list[str] | None = None,
+    defer_noncurrent_outside: list[str] | None = None,
+    deferred: list[str] | None = None,
 ) -> list[str]:
     """Return every object version (current or noncurrent) that still contains one of the needles.
 
@@ -81,6 +83,8 @@ def scan_storage(
     by version id. Hits are reported as ``s3://bucket/key?versionId=...``. ``exclude`` lists
     ``bucket/key-prefix`` strings whose objects are not inspected (the erasure queue itself).
     ``prefixes`` (``bucket/key-prefix``) limits the scan to those locations instead of whole buckets.
+    With ``defer_noncurrent_outside``, hits in *noncurrent* versions outside those prefixes go to
+    ``deferred`` instead of the result (copies that the deletion safety window expires).
     """
     from lakehouse.objectstore import iter_versions, read_version
 
@@ -95,5 +99,15 @@ def scan_storage(
             if version.is_delete_marker or any(f"{bucket}/{version.key}".startswith(e) for e in exclude or ()):
                 continue
             if object_contains(version.key, read_version(fs, bucket, version), needles):
-                hits.append(f"s3://{bucket}/{version.key}?versionId={version.version_id}")
+                hit = f"s3://{bucket}/{version.key}?versionId={version.version_id}"
+                path = f"{bucket}/{version.key}"
+                if (
+                    defer_noncurrent_outside is not None
+                    and not version.is_latest
+                    and not any(path.startswith(p) for p in defer_noncurrent_outside)
+                ):
+                    if deferred is not None:
+                        deferred.append(hit)
+                    continue
+                hits.append(hit)
     return hits

@@ -81,8 +81,8 @@ def env(monkeypatch):
             ],
         )
 
-    def scan(fs, buckets, needles, exclude=None, prefixes=None):
-        scans.append({"needles": needles, "exclude": exclude, "prefixes": prefixes})
+    def scan(fs, buckets, needles, exclude=None, prefixes=None, defer_noncurrent_outside=None, deferred=None):
+        scans.append({"needles": needles, "exclude": exclude, "prefixes": prefixes, "defer": defer_noncurrent_outside})
         return hits.get(needles[0], [])
 
     monkeypatch.setattr(ex, "build_plan", plan)
@@ -95,10 +95,11 @@ def env(monkeypatch):
     monkeypatch.setattr(ex.rq, "queue_location", lambda *a, **k: QUEUE_LOCATION)
     monkeypatch.setattr(ex.rq, "enqueue", lambda *a, **k: pytest.fail("a dry run must not write the queue"))
     monkeypatch.setattr(ex.iceberg, "purge_history", lambda *a, **k: None)
-    monkeypatch.setattr(ex, "purge_noncurrent", lambda *a, **k: 0)
+    purges: list[tuple] = []
+    monkeypatch.setattr(ex, "purge_noncurrent", lambda fs, bucket, prefix="", **k: purges.append((bucket, prefix)) or 0)
     monkeypatch.setattr(ex, "delete_permanently", lambda *a, **k: 0)
     monkeypatch.setattr(ex, "scan_storage", scan)
-    return {"scans": scans, "hits": hits}
+    return {"scans": scans, "hits": hits, "purges": purges}
 
 
 def pending(*rows):
@@ -118,7 +119,14 @@ def test_successful_request_is_dequeued_only_at_the_end(env):
     dequeue = next(i for i, s in enumerate(trino.statements) if s.startswith("delete from") and "erasure_requests" in s)
     assert audit < dequeue, "the request leaves the queue only after the audit row exists"
     # the storage scan skips the queue's own files: they still hold the key at that point
-    assert env["scans"] == [{"needles": [KEY_A], "exclude": [QUEUE_LOCATION], "prefixes": None}]
+    touched = "lakehouse-clean/iceberg/s/t-1234/"
+    assert env["scans"] == [{"needles": [KEY_A], "exclude": [QUEUE_LOCATION], "prefixes": None, "defer": [touched]}]
+    # versions are purged at once only where the subject's data was (and in the queue after dequeue);
+    # the rest of the lake keeps its deletion safety window
+    assert env["purges"] == [
+        ("lakehouse-clean", "iceberg/s/t-1234/"),
+        ("lakehouse-raw", "iceberg/governance/erasure_requests/"),
+    ]
 
 
 def test_scoped_verification_scans_only_the_touched_tables(env):
@@ -202,3 +210,26 @@ def test_dry_run_reads_only_and_never_puts_the_key_in_sql(monkeypatch):
     for sql in trino.statements:
         assert key not in sql and not re.search(r"[0-9a-f]{64}", sql) and "erasure_requests" not in sql
         assert "'ab'" in sql
+
+
+def test_full_scan_defers_old_noncurrent_copies_outside_the_touched_tables(monkeypatch):
+    from governance.erasure import storage_scan
+    from lakehouse import objectstore
+
+    now = datetime.now(UTC)
+    versions = [
+        objectstore.ObjectVersion("iceberg/s/t-1/data/a.parquet", "1", False, False, now),  # touched, noncurrent
+        objectstore.ObjectVersion("iceberg/s/old-2/data/b.parquet", "1", False, False, now),  # dropped table
+        objectstore.ObjectVersion("iceberg/s/other-3/data/c.parquet", "1", True, False, now),  # current
+    ]
+    monkeypatch.setattr(objectstore, "iter_versions", lambda fs, bucket, prefix="": iter(versions))
+    monkeypatch.setattr(objectstore, "read_version", lambda fs, bucket, v: b"needle")
+    deferred: list[str] = []
+    hits = storage_scan.scan_storage(
+        None, ["b"], ["needle"], defer_noncurrent_outside=["b/iceberg/s/t-1/"], deferred=deferred
+    )
+    assert hits == [
+        "s3://b/iceberg/s/t-1/data/a.parquet?versionId=1",
+        "s3://b/iceberg/s/other-3/data/c.parquet?versionId=1",
+    ]
+    assert deferred == ["s3://b/iceberg/s/old-2/data/b.parquet?versionId=1"]

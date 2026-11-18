@@ -9,8 +9,10 @@ Sequence (one queued request; see queue.py for why the key is staged in a table)
 5. remove the native raw files (all object versions) and leave a tombstone without personal data
 6. purge Iceberg history of every touched table (governance.iceberg.purge_history)
 7. verify in SQL
-8. remove every noncurrent object version and delete marker in the lakehouse buckets: on a
-   versioned bucket the files deleted in steps 3-7 are otherwise still readable by version id
+8. remove every noncurrent object version and delete marker under the locations of the touched
+   tables and dropped work tables: on a versioned bucket the files deleted in steps 3-7 are otherwise
+   still readable by version id. The rest of the lake keeps its deletion safety window
+   (NONCURRENT_VERSION_GRACE_DAYS / bucket lifecycle), which expires other noncurrent copies
 9. optionally scan every object version of the lakehouse buckets for the subject (the queue's
    own files are skipped: they hold the key until step 11)
 10. write the audit row (exactly one row, or the request counts as failed)
@@ -98,6 +100,7 @@ class ErasureReport:
     storage_hits: list[str] = field(default_factory=list)
     dropped_work_tables: list[str] = field(default_factory=list)
     purged_object_versions: int = 0
+    deferred_hits: list[str] = field(default_factory=list)  # noncurrent, outside touched tables: expire with the window
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -167,8 +170,9 @@ def _session(trino: TrinoClient | None) -> TrinoClient:
     )
 
 
-def drop_work_tables(trino: TrinoClient) -> list[str]:
-    """Drop leftovers of failed dbt runs (they are copies of model data, invisible to the plan)."""
+def drop_work_tables(trino: TrinoClient, locations: list[str] | None = None) -> list[str]:
+    """Drop leftovers of failed dbt runs (they are copies of model data, invisible to the plan).
+    Their storage locations are appended to ``locations`` (purged by the erasure afterwards)."""
     dropped = []
     for layer in ("clean", "consolidated", "curated"):
         catalog = catalog_of(layer)
@@ -178,6 +182,10 @@ def drop_work_tables(trino: TrinoClient) -> list[str]:
         )
         for schema, table in rows:
             if table.endswith(WORK_TABLE_SUFFIXES):
+                if locations is not None:
+                    location = table_location(trino, f"{catalog}.{schema}.{table}")
+                    if location:
+                        locations.append(location)
                 trino.execute(f"drop table if exists {fqn(catalog, schema, table)}")
                 dropped.append(f"{catalog}.{schema}.{table}")
     return dropped
@@ -290,16 +298,15 @@ def execute_request(
     report.raw_files = sorted(files)
     baselines = _baseline_tables(trino)
     mode = verification_mode(verify_storage)
-    scan_prefixes = None
-    if mode == "scoped":  # before the work: Iceberg tables keep their location, files change
-        locations = [table_location(trino, name) for name in sorted(existing | set(baselines))]
-        scan_prefixes = [loc for loc in locations if loc] + [f"{s3.raw_bucket}/{p}" for p in report.raw_files]
+    # where the subject's data is: locations of the touched tables (read before the work - Iceberg
+    # keeps a table's location, its files change), dropped work tables, the subject's raw files
+    touched = [loc for loc in (table_location(trino, n) for n in sorted(existing | set(baselines))) if loc]
 
     audit_table = _ensure_audit_table(trino)
     rq.stage_digest(report.erasure_id, report.subject_digest)
     failure: Exception | None = None
     try:
-        report.dropped_work_tables = drop_work_tables(trino)
+        report.dropped_work_tables = drop_work_tables(trino, touched)
         for step in steps:
             for statement in step.statements:
                 trino.execute(statement)
@@ -326,13 +333,27 @@ def execute_request(
         if report.remaining:
             raise ErasureVerificationError(f"subject still present in tables: {report.remaining}")
 
-        for bucket in lake_buckets(s3):
-            report.purged_object_versions += purge_noncurrent(purge_fs, bucket)
+        # Only where the subject's data was are noncurrent versions removed at once. Elsewhere the
+        # deletion safety window (NONCURRENT_VERSION_GRACE_DAYS / bucket lifecycle) stays intact, so
+        # a nightly erasure does not make every accidental delete of the day unrecoverable.
+        for location in touched:
+            bucket, _, prefix = location.partition("/")
+            report.purged_object_versions += purge_noncurrent(purge_fs, bucket, prefix)
         if mode != "off":
             needles = [key] + ([identifier] if identifier else [])
-            # the queue still holds the key (it is removed only after success): skip its files
+            scope = touched + [f"{s3.raw_bucket}/{p}" for p in report.raw_files]
+            # the queue still holds the key (it is removed only after success): skip its files.
+            # full: every object of the lake; noncurrent versions outside the touched locations are
+            # copies the safety window will expire (e.g. a table dropped and re-created elsewhere) -
+            # reported, not a failure
             report.storage_hits = scan_storage(
-                purge_fs, lake_buckets(s3), needles, exclude=[rq.queue_location()], prefixes=scan_prefixes
+                purge_fs,
+                lake_buckets(s3),
+                needles,
+                exclude=[rq.queue_location()],
+                prefixes=scope if mode == "scoped" else None,
+                defer_noncurrent_outside=scope if mode == "full" else None,
+                deferred=report.deferred_hits,
             )
         if report.storage_hits:
             raise ErasureVerificationError(f"subject still present in objects: {report.storage_hits[:5]}")

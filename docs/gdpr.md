@@ -130,13 +130,18 @@ They age out with the table's own rule (payments 5 years after the payment date,
 after closing) through the normal `retention` job. Residual risks, accepted by the controller:
 the case number (`clean.cases.case_id`, the table's key) still identifies the case in the source
 system for as long as the source keeps it; a case that is still open never reaches its retention
-rule and stays anonymised until it is closed in the source. The erasure audit row records the scope. Deleted rows remain reachable through older snapshots
-until `iceberg_maintenance` expires them, and - on versioned buckets - the expired files remain as
-noncurrent object versions until the maintenance step `purge_noncurrent_versions` removes them once
-they have been noncurrent longer than the layer's orphan file retention. The effective retention is
-therefore the rule plus the snapshot window plus the orphan file window (raw 3+3 days, clean and
-consolidated 7+7, curated 14+7 with the demo values). Landing files deleted by retention are removed
-with all their versions at once. The periods above are placeholders
+rule and stays anonymised until it is closed in the source. The erasure audit row records the scope.
+
+Deleted rows remain reachable through older snapshots until `iceberg_maintenance` expires them,
+and - on versioned buckets - deleted files (expired Iceberg files, landing files removed by
+retention) remain as noncurrent object versions for the **deletion safety window**:
+`NONCURRENT_VERSION_GRACE_DAYS` (default 7, equal to the platform's bucket lifecycle
+`lakehouse_noncurrent_version_days`). Within it an accidental delete can be undone by version id;
+afterwards the lifecycle, or the maintenance step `purge_noncurrent_versions` (window or the layer's
+orphan file retention, whichever is longer), removes them. Retention itself deletes only the current
+version. The effective retention is therefore the rule plus the snapshot window plus the safety
+window (raw 3+7 days, clean and consolidated 7+7, curated 14+7 with the demo values). Only the
+erasure removes versions earlier, see below. The periods above are placeholders
 for the demo; the controller sets the real ones.
 
 ## Right to erasure (GDPR art. 17)
@@ -182,14 +187,25 @@ What happens, in order (`governance/erasure/plan.py`, derived from dbt meta and 
    older data file, delete file and manifest.
 9. Verification in SQL: every planned table is queried again (through the queued key).
 10. Object versions: on a versioned bucket every file deleted in steps 2-9 is still readable by
-    version id. All noncurrent versions and delete markers in the four lakehouse buckets are removed
-    (`PURGE_S3_*` credentials with `s3:DeleteObjectVersion`); the job fails rather than report success
-    if it lacks the permission. This also ends the object-version recovery window for unrelated
-    deleted files - Iceberg never overwrites files, so only already deleted objects are affected.
+    version id. The erasure removes at once every noncurrent version and delete marker **under the
+    locations of the touched tables and of the dropped dbt work tables** (read before the work; an
+    Iceberg table keeps its location) - the native raw files were already removed with all versions
+    in step 7 (`PURGE_S3_*` credentials with `s3:DeleteObjectVersion`; the job fails rather than
+    report success without the permission). Everywhere else the deletion safety window stays intact.
+    Why not the whole lake (as before): the erasure job runs every night, so a lake-wide purge would
+    reduce the safety window for every accidental delete or `DROP TABLE` to less than a day. The
+    price: copies of the subject in noncurrent versions *outside* the touched tables - typically a
+    table that was dropped and re-created at a new location, or a dbt work table dropped by dbt
+    itself - stay readable by version id (only with read access to the bucket, not through the
+    catalog) until the safety window expires them, at most `NONCURRENT_VERSION_GRACE_DAYS` after
+    they became noncurrent. The controller treats them like backups (erasure completes when the
+    window has passed); the `full` storage verification lists them as `deferred_hits` instead of
+    failing.
 11. With `--verify-storage` / `ERASURE_VERIFY_STORAGE` object *versions* are decoded (Parquet, Avro
     manifests, text) and searched for the identifier and the key: `scoped` covers every version under
     the touched tables' locations and the subject's raw files, `full` every version of the four
-    buckets (O(lake) per request: audits and small lakes only). The files of the request queue are
+    buckets (O(lake) per request: audits and small lakes only; noncurrent hits outside the touched
+    tables are reported as `deferred_hits`, see step 10). The files of the request queue are
     skipped: they still hold the key, by design, until step 13.
 12. An audit row is written to `curated.audit.erasure_log`: erasure id, who requested it, reason,
     status, executing principal, affected tables and counts, and a keyed digest of the subject
