@@ -172,9 +172,12 @@ the harness files in `tests/integration/` are a working reference configuration.
 
 **Dagster**
 * User code deployment from the image; run launcher pods with the same image and environment.
-* Compute logs: run pods log to stdout. An S3 compute log manager would need `dagster-aws` in the image,
-  which is not included yet (open item; it is a small dependency, to be added together with the
-  platform configuration that wants it).
+* Compute logs: run pods log to stdout. The image contains `dagster-aws` (pinned with the other
+  Dagster packages), so the instance may use `dagster_aws.s3.compute_log_manager.S3ComputeLogManager`
+  (e.g. bucket `platform-logs`, `endpoint_url` = RustFS, credentials from the environment, CA bundle via
+  `AWS_CA_BUNDLE`). The webserver/daemon image of the platform needs the same package to read them.
+  Compute logs can contain whatever a step prints; the solution never prints identifiers, but the
+  bucket still needs the platform's log retention.
 * Pool `lakehouse_writer` limited to 1.
 * Egress (NetworkPolicy) from the orchestration namespace to Trino, Polaris, RustFS and the Dagster database.
 
