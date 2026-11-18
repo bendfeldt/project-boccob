@@ -33,9 +33,11 @@ would disappear while the keystore and the facts still refer to their keys.
    * every statement is idempotent and tolerates a missing table (`ALTER TABLE IF EXISTS ...
      DROP COLUMN IF EXISTS ...`): on a new lake the migration is recorded without effect, and a
      migration that failed half way simply runs again;
-   * `-- @purge-history <layer>.<schema>.<table>` rewrites the data files and expires the table's
-     history afterwards - use it when the change removes personal data (a dropped column is only
-     hidden by Iceberg until the old files are gone);
+   * `-- @purge-history <layer>.<schema>.<table>` rewrites every row of the table and then expires
+     its history (one full rewrite; time travel of the table is lost) - use it when the change
+     removes personal data: a dropped column is only hidden by Iceberg until the old files are gone,
+     and OPTIMIZE alone leaves a lone file without delete files untouched. The replaced files remain
+     as noncurrent object versions until the maintenance job / bucket lifecycle removes them;
    * no key-like or CPR-shaped literal (query text is archived WORM; the runner refuses such files);
    * never edit a migration once it is released: the runner compares checksums and stops.
 

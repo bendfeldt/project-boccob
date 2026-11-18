@@ -83,6 +83,10 @@ class FakeTrino:
             return [[c] for c in self.columns]
         return [[True]]
 
+    def scalar(self, sql, params=None):
+        rows = self.execute(sql, params)
+        return rows[0][0] if rows else None
+
     def table_exists(self, *parts):
         return False
 
@@ -127,3 +131,30 @@ def test_drift_check_flags_columns_the_model_dropped():
         "clean.borgerportal.citizens.cpr_number: in the lake but not in the model - ship a migration",
         "clean.borgerportal.citizens.is_deleted: in the lake but not in the model - ship a migration",
     ]
+
+
+def test_purge_history_rewrites_every_row_first(tmp_path, monkeypatch):
+    """A single data file without deletes would survive OPTIMIZE with the dropped column's values."""
+    write(
+        tmp_path,
+        "V0001__a.sql",
+        "alter table if exists ${clean}.s.t drop column if exists x;\n-- @purge-history clean.s.t",
+    )
+    calls = []
+    monkeypatch.setattr(mr.iceberg, "purge_history", lambda trino, ref: calls.append(("purge", str(ref))))
+
+    class Existing(FakeTrino):
+        def table_exists(self, *parts):
+            return True
+
+        def execute(self, sql, params=None):
+            if "information_schema.columns" in sql and "ordinal_position" in sql:
+                self.statements.append(sql)
+                return [["citizen_id"]]
+            if sql.startswith("update"):
+                calls.append(("update", sql))
+            return super().execute(sql, params)
+
+    report = mr.run_migrations(directory=tmp_path, trino=Existing(), check_drift=False)
+    assert report.purged == ["clean.s.t"]
+    assert calls == [("update", 'update "clean"."s"."t" set "citizen_id" = "citizen_id"'), ("purge", "clean.s.t")]

@@ -17,9 +17,9 @@ File format::
 * every statement must be idempotent and must tolerate a missing table (``IF EXISTS``): on a new lake
   the tables do not exist yet and the migration is recorded without effect; a migration that failed
   half way is simply run again
-* ``-- @purge-history <layer>.<schema>.<table>`` rewrites the table's data files and expires its
-  history afterwards (governance.iceberg.purge_history), e.g. so that a dropped personal-data column
-  is physically gone and not only hidden; skipped when the table does not exist
+* ``-- @purge-history <layer>.<schema>.<table>`` rewrites every row of the table and expires its
+  history afterwards (rewrite_all_rows + governance.iceberg.purge_history), e.g. so that a dropped
+  personal-data column is physically gone and not only hidden; skipped when the table does not exist
 * no key-like (64-hex) or CPR-shaped literal may appear: SQL text is archived WORM
 
 Applied migrations are recorded in ``curated.audit.schema_migrations`` (protected schema: only the
@@ -183,6 +183,23 @@ def check(migrations: list[Migration], applied: dict[str, tuple[str, str]]) -> l
     return [m for m in migrations if m.version not in applied]
 
 
+def rewrite_all_rows(trino: TrinoClient, ref: iceberg.TableRef) -> None:
+    """Make sure no data file of the table survives the following purge.
+
+    OPTIMIZE leaves a file alone when there is nothing to merge (e.g. a single file without delete
+    files), and such a file would keep the values of a dropped column. A self-assignment of the
+    first column marks every row deleted and rewrites it with the current schema; OPTIMIZE then
+    has delete files to apply and replaces every old file. Costs one rewrite of the table.
+    """
+    first = trino.scalar(
+        f"select column_name from {ident(ref.catalog)}.information_schema.columns "
+        "where table_schema = ? and table_name = ? order by ordinal_position limit 1",
+        [ref.schema, ref.table],
+    )
+    if first:
+        trino.execute(f"update {ref.sql} set {ident(first)} = {ident(first)}")
+
+
 def apply(trino: TrinoClient, migration: Migration) -> list[str]:
     started = time.monotonic()
     for statement in migration.statements:
@@ -192,6 +209,7 @@ def apply(trino: TrinoClient, migration: Migration) -> list[str]:
     for layer, schema, table in migration.purge_history:
         ref = iceberg.TableRef(catalog_of(layer), schema, table)
         if trino.table_exists(ref.catalog, ref.schema, ref.table):
+            rewrite_all_rows(trino, ref)
             iceberg.purge_history(trino, ref)
             purged.append(str(ref))
     result = trino.execute(
