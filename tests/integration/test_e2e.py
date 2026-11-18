@@ -109,6 +109,11 @@ def previous_release_project(target: Path) -> Path:
             ).replace("  citizen_id,\n  first_name,", "  citizen_id,\n  cpr_number,\n  first_name,")
             assert text.count("cpr_number") == 2
         sql.write_text(text, encoding="utf-8")
+    models_yml = project / "models" / "clean" / "borgerportal" / "_models.yml"
+    text = models_yml.read_text(encoding="utf-8")
+    anonymised_test = '          - not_null:\n              config: {where: "_anonymised_at is null"}\n'
+    assert anonymised_test in text
+    models_yml.write_text(text.replace(anonymised_test, "          - not_null\n"), encoding="utf-8")
     return project
 
 
