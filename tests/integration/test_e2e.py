@@ -113,7 +113,12 @@ def previous_release_project(target: Path) -> Path:
     text = models_yml.read_text(encoding="utf-8")
     anonymised_test = '          - not_null:\n              config: {where: "_anonymised_at is null"}\n'
     assert anonymised_test in text
-    models_yml.write_text(text.replace(anonymised_test, "          - not_null\n"), encoding="utf-8")
+    text = text.replace(anonymised_test, "          - not_null\n")
+    # the column did not exist yet: no documentation either (persist_docs would comment on it)
+    text = re.sub(r"      - &tc_anonymised_at\n(        .*\n){3}", "", text)
+    text = text.replace("      - *tc_anonymised_at\n", "")
+    assert "name: _anonymised_at" not in text and "tc_anonymised_at" not in text
+    models_yml.write_text(text, encoding="utf-8")
     return project
 
 
