@@ -35,6 +35,30 @@ QUEUE_SCHEMA = pa.schema(
 )
 
 
+DIGEST_TABLE = "erasure_digests"
+DIGEST_SCHEMA = pa.schema(
+    [
+        pa.field("erasure_id", pa.string(), nullable=False),
+        pa.field("subject_digest", pa.string(), nullable=False),
+        pa.field("staged_at", pa.timestamp("us", tz="UTC"), nullable=False),
+    ]
+)
+
+
+def digest_table_sql() -> str:
+    return fqn(catalog_of("raw"), QUEUE_NAMESPACE, DIGEST_TABLE)
+
+
+def stage_digest(erasure_id: str, subject_digest: str, catalog=None) -> None:
+    """The keyed audit digest reaches curated.audit.erasure_log through INSERT ... SELECT from
+    here, so it does not appear in query text either (with the pepper it would confirm a CPR)."""
+    catalog = catalog or _catalog()
+    catalog.create_namespace_if_not_exists(QUEUE_NAMESPACE)
+    table = catalog.create_table_if_not_exists(f"{QUEUE_NAMESPACE}.{DIGEST_TABLE}", schema=DIGEST_SCHEMA)
+    row = {"erasure_id": erasure_id, "subject_digest": subject_digest, "staged_at": datetime.now(UTC)}
+    table.append(pa.Table.from_pylist([row], schema=DIGEST_SCHEMA))
+
+
 def queue_table_sql() -> str:
     return fqn(catalog_of("raw"), QUEUE_NAMESPACE, QUEUE_TABLE)
 

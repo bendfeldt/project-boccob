@@ -201,6 +201,7 @@ def execute_request(
         return report
 
     audit_table = _ensure_audit_table(trino)
+    rq.stage_digest(report.erasure_id, report.subject_digest)
     try:
         report.dropped_work_tables = drop_work_tables(trino)
         for step in steps:
@@ -244,11 +245,12 @@ def execute_request(
         raise
     finally:
         details = {k: v for k, v in report.as_dict().items() if k not in ("erasure_id", "subject_digest", "status")}
+        # the digest is copied from the staging table: no 64-hex value in the query text
         trino.execute(
-            f"insert into {audit_table} values (?, ?, ?, ?, ?, ?, ?, ?, current_user, ?)",
+            f"insert into {audit_table} select ?, d.subject_digest, ?, ?, ?, ?, ?, ?, current_user, ? "
+            f"from {rq.digest_table_sql()} d where d.erasure_id = ?",
             [
                 report.erasure_id,
-                report.subject_digest,
                 identifier_type,
                 requested_by,
                 f"{reason} (request {request_id})",
@@ -256,8 +258,10 @@ def execute_request(
                 started,
                 datetime.now(UTC),
                 json.dumps(details, default=str),
+                report.erasure_id,
             ],
         )
+        trino.execute(f"delete from {rq.digest_table_sql()} where erasure_id = ?", [report.erasure_id])
         log.info("erasure %s %s: %s", report.erasure_id, report.status, json.dumps(details, default=str))
     return report
 

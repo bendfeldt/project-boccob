@@ -70,7 +70,7 @@ up() {
   podman network exists "$NET" || podman network create "$NET" >/dev/null
 
   log "starting RustFS"
-  podman run -d --replace --name sol-rustfs --network "$NET" --memory 1g \
+  podman run -d --replace --name sol-rustfs --network "$NET" --memory 2g \
     -p "127.0.0.1:${RUSTFS_PORT}:9000" \
     -e RUSTFS_ACCESS_KEY="$S3_ACCESS_KEY_ID" -e RUSTFS_SECRET_KEY="$S3_SECRET_ACCESS_KEY" \
     -e RUSTFS_ADDRESS=":9000" -e RUSTFS_CONSOLE_ENABLE=false \

@@ -132,9 +132,11 @@ def noncurrent_hits(fs, buckets: list[str], needles: list[str]) -> list[str]:
 
 
 def erasure_query_texts(trino: TrinoClient) -> list[str]:
+    """Query texts of the governance tooling, read as the auditor (svc-dagster may not see them)."""
+    auditor = TrinoClient(user="axel-auditor")
     return [
         r[0]
-        for r in trino.execute(
+        for r in auditor.execute(
             "select query from system.runtime.queries where source in ('lakehouse-erasure', 'lakehouse-retention')"
         )
     ]
@@ -454,7 +456,7 @@ def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
     # H-1: no query issued by the erasure tooling carries the identifier or the pseudonym
     texts = erasure_query_texts(trino)
     assert len(texts) > 50, "sanity: the erasure queries are in the query history"
-    assert not [t for t in texts if key in t or cpr in t]
+    assert not [t for t in texts if key in t or cpr in t or re.search(r"[0-9a-f]{64}", t)], "no key-like literal"
     assert any(request_id in t for t in texts), "statements reference the request id instead"
     for table, column in (
         ("clean.borgerportal.citizens", "citizen_id"),
@@ -497,6 +499,9 @@ def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
     assert len(audit) == 1 and audit[0][:3] == ["completed", "dpo@kommune.example", "svc-dagster"]
     assert request_id in audit[0][3]
     assert cpr not in json.dumps(audit) and key not in json.dumps(audit)
+    from governance.erasure.executor import audit_digest
+
+    assert audit[0][4] == audit_digest(key, pseudonym_pepper()), "the keyed digest proves which subject was erased"
     assert trino.scalar(f"select count(*) from {queue_table_sql()}") == 0
     for user in ("erik-engineer", "alice-admin"):  # M-1: the evidence cannot be tampered with
         with pytest.raises(trino_errors.TrinoUserError):
