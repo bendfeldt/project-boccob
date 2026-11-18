@@ -24,12 +24,6 @@ models:
         description: Pseudonymised person key - HMAC-SHA256 of the CPR number with a secret pepper
         config: {meta: {pii: indirect, pseudonymised: true}}
         data_tests: [not_null, pseudonym_format]
-      - name: cpr_number
-        description: CPR number (civil registration number) exactly as delivered
-        config: {meta: {pii: direct, cpr: true, mask: redact}}
-        data_tests:
-          - not_null
-          - cpr_shape
       - name: first_name
         description: Given name
         config: {meta: {pii: direct, mask: redact}}

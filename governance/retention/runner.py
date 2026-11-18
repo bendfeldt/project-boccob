@@ -134,6 +134,29 @@ def expired_landing_objects(
     return expired
 
 
+def queue_deregistered(trino: TrinoClient, plan: RetentionPlan, *, dry_run: bool = False) -> list[dict[str, Any]]:
+    """Insert the keys of subjects due for erasure into the erasure queue (INSERT ... SELECT:
+    the keys never appear in SQL text). Returns the count per table."""
+    from governance.erasure.queue import ensure_queue, queue_table_sql
+
+    if not plan.deregistrations:
+        return []
+    ensure_queue()
+    counts = []
+    for d in plan.deregistrations:
+        if dry_run:
+            count = trino.scalar(f"select count(*) from ({d.select_sql})")
+        else:
+            result = trino.execute(
+                f"insert into {queue_table_sql()} "
+                "select cast(uuid() as varchar), subject, 'subject_key', 'retention-policy', "
+                f"'{d.reason}', current_timestamp from ({d.select_sql})"
+            )
+            count = result[0][0] if result and result[0] else 0
+        counts.append({"table": d.table, "queued_for_erasure": count})
+    return counts
+
+
 def run_retention(
     *, dry_run: bool = False, today: date | None = None, trino: TrinoClient | None = None, s3: S3Settings | None = None
 ) -> dict[str, Any]:
@@ -169,21 +192,7 @@ def run_retention(
 
     # Master data has no time rule while the person is registered. Deregistered subjects are
     # queued for the erasure job (all layers, keystore anonymised) once the grace period is over.
-    if plan.deregistrations:
-        from governance.erasure.queue import ensure_queue, queue_table_sql
-
-        ensure_queue()
-        for d in plan.deregistrations:
-            if dry_run:
-                count = trino.scalar(f"select count(*) from ({d.select_sql})")
-            else:
-                result = trino.execute(
-                    f"insert into {queue_table_sql()} "
-                    "select cast(uuid() as varchar), subject, 'subject_key', 'retention-policy', "
-                    f"'{d.reason}', current_timestamp from ({d.select_sql})"
-                )
-                count = result[0][0] if result and result[0] else 0
-            report["deregistered_subjects"].append({"table": d.table, "queued_for_erasure": count})
+    report["deregistered_subjects"] = queue_deregistered(trino, plan, dry_run=dry_run)
 
     for source in sources:
         prefix = f"{s3.raw_bucket}/{source.name}/"

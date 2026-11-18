@@ -8,6 +8,9 @@
 }}
 -- One row per delivered state of a citizen (change history, source aligned).
 -- Parsed + typed + deduplicated; the address is denormalised into the row.
+-- Data minimisation: the CPR number is not carried over. The pseudonymised key citizen_id
+-- (HMAC of the CPR, computed at indexing) is the only person identifier from clean onward;
+-- the CPR itself stays in the raw layer (native files and the masked raw index payload).
 with raw as (
   select {{ raw_columns() }}
   from {{ source('raw_borgerportal', 'citizens') }}
@@ -17,7 +20,6 @@ with raw as (
 parsed as (
   select
     {{ subject_key('cpr') }} as citizen_id,
-    {{ json_text('$.cpr') }} as cpr_number,
     {{ json_text('$.name.first') }} as first_name,
     {{ json_text('$.name.last') }} as last_name,
     {{ json_text('$.address.street') }} as street,
@@ -50,7 +52,6 @@ deduplicated as (
 
 select
   citizen_id,
-  cpr_number,
   first_name,
   last_name,
   concat_ws(' ', first_name, last_name) as full_name,

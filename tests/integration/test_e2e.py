@@ -26,12 +26,16 @@ os.environ["ERASURE_VERIFY_STORAGE"] = "true"
 if not os.environ.get("TRINO_HOST"):
     pytest.skip("integration harness environment not loaded (make integration)", allow_module_level=True)
 
-from governance.erasure.executor import submit_request  # noqa: E402
-from governance.erasure.storage_scan import scan_storage  # noqa: E402
+from trino import exceptions as trino_errors  # noqa: E402
+
+from governance.erasure.executor import erase_subject, submit_request  # noqa: E402
+from governance.erasure.queue import queue_table_sql  # noqa: E402
+from governance.erasure.storage_scan import object_contains, scan_storage  # noqa: E402
 from ingestion.framework.manifest import read_manifests, sha256_hex  # noqa: E402
 from ingestion.framework.pseudonym import pseudonymise  # noqa: E402
 from ingestion.framework.spec import load_source  # noqa: E402
 from ingestion.sources.borgerportal import generator  # noqa: E402
+from lakehouse.objectstore import iter_versions, read_version  # noqa: E402
 from lakehouse.settings import S3Settings, pseudonym_pepper  # noqa: E402
 from lakehouse.trino_client import TrinoClient  # noqa: E402
 
@@ -102,6 +106,40 @@ def fact_keys(trino: TrinoClient) -> dict[str, tuple]:
     return {r[0]: (r[1], r[2]) for r in rows}
 
 
+def cpr_by_key(deliveries: int = 3) -> dict[str, str]:
+    """Pseudonym -> CPR for every person the generator delivered (clean holds no CPR any more)."""
+    pepper = pseudonym_pepper()
+    out = {}
+    for seq in range(1, deliveries + 1):
+        batch = generator.simulate(SEED, seq, CITIZENS)
+        for rec in batch.citizens + batch.cases + batch.payments:
+            out[pseudonymise(rec["cpr"], pepper)] = rec["cpr"]
+    return out
+
+
+def noncurrent_hits(fs, buckets: list[str], needles: list[str]) -> list[str]:
+    """Object versions that are no longer current (deleted or overwritten) and contain a needle."""
+    hits = []
+    for bucket in buckets:
+        for v in iter_versions(fs, bucket):
+            if (
+                not v.is_latest
+                and not v.is_delete_marker
+                and object_contains(v.key, read_version(fs, bucket, v), needles)
+            ):
+                hits.append(f"s3://{bucket}/{v.key}?versionId={v.version_id}")
+    return hits
+
+
+def erasure_query_texts(trino: TrinoClient) -> list[str]:
+    return [
+        r[0]
+        for r in trino.execute(
+            "select query from system.runtime.queries where source in ('lakehouse-erasure', 'lakehouse-retention')"
+        )
+    ]
+
+
 def assert_dense_keys(ks: dict[int, dict]) -> None:
     positive = sorted(k for k in ks if k > 0)
     assert positive == list(range(1, len(positive) + 1)), "surrogate keys must be sequential without gaps"
@@ -151,8 +189,11 @@ def test_01_initial_load(trino, fs, s3):
     )
     pepper = pseudonym_pepper()
     sample = batch.citizens[0]["cpr"]
-    assert trino.scalar("select citizen_id from clean.borgerportal.citizens where cpr_number = ?", [sample]) == (
-        pseudonymise(sample, pepper)
+    assert (
+        trino.scalar(
+            "select count(*) from clean.borgerportal.citizens where citizen_id = ?", [pseudonymise(sample, pepper)]
+        )
+        > 0
     )
     amount, pay_date = trino.execute(
         "select amount, payment_date from clean.borgerportal.payments where payment_id = ?",
@@ -161,14 +202,15 @@ def test_01_initial_load(trino, fs, s3):
     assert str(amount) == batch.payments[0]["amount"].replace(".", "").replace(",", ".")
     assert pay_date.strftime("%d-%m-%Y") == batch.payments[0]["payment_date"]
 
-    # the CPR number stays in clean: no column and no stored value beyond it
+    # data minimisation: the CPR number exists only in the raw layer - no column, no stored value beyond it
     cpr_columns = trino.execute(
-        "select table_catalog from consolidated.information_schema.columns where column_name like '%cpr%' "
+        "select table_catalog from clean.information_schema.columns where column_name like '%cpr%' "
+        "union all select table_catalog from consolidated.information_schema.columns where column_name like '%cpr%' "
         "union all select table_catalog from curated.information_schema.columns where column_name like '%cpr%'"
     )
     assert cpr_columns == []
-    assert scan_storage(fs, ["lakehouse-consolidated", "lakehouse-curated"], [sample]) == []
-    assert scan_storage(fs, ["lakehouse-clean"], [sample]) != [], "sanity: the scanner must find the CPR in clean"
+    assert scan_storage(fs, ["lakehouse-clean", "lakehouse-consolidated", "lakehouse-curated"], [sample]) == []
+    assert scan_storage(fs, ["lakehouse-raw"], [sample]) != [], "sanity: the scanner must find the CPR in raw"
 
     # KEYSTORE
     ks = keystore(trino, "dim_citizen")
@@ -334,15 +376,25 @@ def test_05_access_control_and_masking():
         _as("mallory", "select 1")
 
     # engineers work on all layers but see classified columns masked unless they are pii readers
-    cpr, city = _as("erik-engineer", "select cpr_number, city from clean.borgerportal.citizens limit 1")[0]
-    assert cpr == "*****" and city
+    name, city = _as(
+        "erik-engineer", "select first_name, city from clean.borgerportal.citizens where first_name is not null limit 1"
+    )[0]
+    assert name == "*****" and city
     assert _as("erik-engineer", "select payload from raw.borgerportal.citizens limit 1") == [[None]]
-    assert re.fullmatch(
-        r"\d{6}-\d{4}", _as("svc-dagster", "select cpr_number from clean.borgerportal.citizens limit 1")[0][0]
-    )
+    payload = _as("svc-dagster", "select payload from raw.borgerportal.citizens limit 1")[0][0]
+    assert re.search(r"\d{6}-\d{4}", payload), "the pipeline reads the raw record unmasked"
+
+    # protected schemas: only the pipeline service account writes the keystore (M-1)
+    for user in ("erik-engineer", "alice-admin"):
+        with pytest.raises(denied):
+            _as(user, "delete from curated.keystore.dim_citizen where surrogate_key = 1")
+        with pytest.raises(denied):
+            _as(user, "set session curated.expire_snapshots_min_retention = '0s'")
 
     # auditor: read only, masked, may inspect query history
-    assert _as("axel-auditor", "select cpr_number from clean.borgerportal.citizens limit 1") == [["*****"]]
+    assert _as(
+        "axel-auditor", "select first_name from clean.borgerportal.citizens where first_name is not null limit 1"
+    ) == [["*****"]]
     assert _as("axel-auditor", "select count(*) from system.runtime.queries")[0][0] > 0
     with pytest.raises(denied):
         _as("axel-auditor", "delete from clean.borgerportal.citizens")
@@ -359,14 +411,13 @@ def test_05_access_control_and_masking():
 
 
 def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
-    pepper = pseudonym_pepper()
-    cpr = trino.scalar(
-        """select c.cpr_number from clean.borgerportal.citizens c
+    key = trino.scalar(
+        """select c.citizen_id from clean.borgerportal.citizens c
            join clean.borgerportal.payments p on p.citizen_id = c.citizen_id
-           group by c.cpr_number having count(distinct c.source_updated_at) > 1 limit 1"""
+           group by c.citizen_id having count(distinct c.source_updated_at) > 1 limit 1"""
     )
-    assert cpr, "need a citizen with history and payments"
-    key = pseudonymise(cpr, pepper)
+    assert key, "need a citizen with history and payments"
+    cpr = cpr_by_key()[key]
     subject_keys = [
         r[0]
         for r in trino.execute("select surrogate_key from curated.keystore.dim_citizen where business_key = ?", [key])
@@ -381,14 +432,30 @@ def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
     before = scan_storage(fs, BUCKETS, [cpr, key])
     for bucket in BUCKETS:
         assert any(h.startswith(f"s3://{bucket}/") for h in before), f"sanity: subject must be present in {bucket}"
+    # versioned buckets: deleted files (dropped dbt temp tables, the dimensions dropped in test_03,
+    # expired snapshots) still hold the subject as noncurrent versions - the case C-1 is about
+    stale = noncurrent_hits(fs, BUCKETS, [cpr, key])
+    assert stale, "sanity: noncurrent object versions must contain the subject before the erasure"
+
+    # dry run through the same queue: counts, then the request is gone again
+    preview = erase_subject(identifier=cpr, requested_by="dpo@kommune.example", reason="preview", dry_run=True)
+    assert preview.rows["clean.borgerportal.citizens [delete]"] > 1 and preview.raw_files
+    assert trino.scalar(f"select count(*) from {queue_table_sql()}") == 0
 
     request_id = submit_request(identifier=cpr, requested_by="dpo@kommune.example", reason="integration test")
     result = run_job("erasure")  # GovernanceResource verifies the object store itself (ERASURE_VERIFY_STORAGE)
     events = json.dumps([str(e.event_specific_data) for e in result.all_events])
     assert cpr not in events and key not in events, "no identifier may leak into orchestrator events"
 
-    # physically gone: no object in any bucket contains the CPR number or the pseudonym
+    # physically gone: no object version (current or noncurrent) contains the CPR number or the pseudonym
     assert scan_storage(fs, BUCKETS, [cpr, key]) == []
+    assert all(not v.is_delete_marker or v.is_latest for b in BUCKETS for v in iter_versions(fs, b))
+    assert all(v.is_latest for b in BUCKETS for v in iter_versions(fs, b)), "no noncurrent version survives"
+    # H-1: no query issued by the erasure tooling carries the identifier or the pseudonym
+    texts = erasure_query_texts(trino)
+    assert len(texts) > 50, "sanity: the erasure queries are in the query history"
+    assert not [t for t in texts if key in t or cpr in t]
+    assert any(request_id in t for t in texts), "statements reference the request id instead"
     for table, column in (
         ("clean.borgerportal.citizens", "citizen_id"),
         ("clean.borgerportal.cases", "citizen_id"),
@@ -430,7 +497,12 @@ def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
     assert len(audit) == 1 and audit[0][:3] == ["completed", "dpo@kommune.example", "svc-dagster"]
     assert request_id in audit[0][3]
     assert cpr not in json.dumps(audit) and key not in json.dumps(audit)
-    assert trino.scalar("select count(*) from curated.audit.erasure_requests") == 0
+    assert trino.scalar(f"select count(*) from {queue_table_sql()}") == 0
+    for user in ("erik-engineer", "alice-admin"):  # M-1: the evidence cannot be tampered with
+        with pytest.raises(trino_errors.TrinoUserError):
+            _as(user, "delete from curated.audit.erasure_log")
+        with pytest.raises(trino_errors.TrinoUserError):
+            _as(user, f"insert into {queue_table_sql()} values ('x', 'y', 'z', 'u', 'v', current_timestamp)")
     # a raw file that contained the subject is replaced by a tombstone, its other records stay indexed
     tombstones = [p for p in fs.find(s3.raw_bucket) if p.endswith(".erased.json")]
     assert tombstones and all(not fs.exists(p.removesuffix(".erased.json")) for p in tombstones)
@@ -474,7 +546,34 @@ def test_08_retention_and_maintenance_jobs(trino, fs, s3):
     assert expired["raw.borgerportal.citizens"] > 0 and future["landing_objects"] > 0
     assert trino.scalar("select count(*) from curated.borgerservice.fact_payment") == facts, "dry run deletes nothing"
 
-    run_job("iceberg_maintenance")
+    # M-2: deregistered persons are queued for erasure once the grace period is over
+    from governance.classification import manifest as cm
+    from governance.config import load_retention, manifest_path
+    from governance.retention.runner import plan_retention, queue_deregistered
+    from ingestion.framework.spec import list_sources
+
+    assert run_retention(dry_run=True)["deregistered_subjects"][0]["queued_for_erasure"] == 0, "grace period"
+    (dereg,) = future["deregistered_subjects"]
+    tombstoned = trino.scalar(
+        "select count(*) from (select citizen_id, max_by(is_deleted, source_updated_at) d "
+        "from clean.borgerportal.citizens group by 1) where d"
+    )
+    assert dereg["queued_for_erasure"] == tombstoned > 0
+    plan = plan_retention(
+        cm.tables_from_manifest(cm.load_manifest(manifest_path())), list_sources(), load_retention(), date(2040, 1, 1)
+    )
+    queue_deregistered(trino, plan)
+    assert (
+        trino.scalar(f"select count(*) from {queue_table_sql()} where requested_by = 'retention-policy'") == tombstoned
+    )
+    queue_deregistered(trino, plan)  # idempotent: already queued subjects are not queued twice
+    assert trino.scalar(f"select count(*) from {queue_table_sql()}") == tombstoned
+    assert not [t for t in erasure_query_texts(trino) if re.search(r"'[0-9a-f]{64}'", t)]
+    trino.execute(f"delete from {queue_table_sql()} where requested_by = 'retention-policy'")
+
+    result = run_job("iceberg_maintenance")
+    ops = [e for e in result.all_events if e.event_type_value == "STEP_OUTPUT"]
+    assert ops
     assert trino.scalar("select count(*) from curated.borgerservice.fact_payment") == facts
     assert "ERROR=0" in dbt("test")
 

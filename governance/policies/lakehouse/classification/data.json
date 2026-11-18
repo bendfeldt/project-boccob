@@ -114,11 +114,6 @@
         "city": {
           "pii": "indirect"
         },
-        "cpr_number": {
-          "cpr": true,
-          "mask": "redact",
-          "pii": "direct"
-        },
         "email": {
           "mask": "email",
           "pii": "direct"
