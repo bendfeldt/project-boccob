@@ -135,6 +135,26 @@ def _baseline_tables(trino: TrinoClient) -> list[str]:
     return [f"{catalog}.{KEYSTORE_SCHEMA}.{r[0]}" for r in rows if r[0].endswith("__baseline")]
 
 
+def verification_mode(value: bool | str | None) -> str:
+    """``ERASURE_VERIFY_STORAGE``: ``full``/``true`` scans every object version of the four lake
+    buckets (O(lake), audits only); ``scoped`` scans the locations of the touched tables and the
+    subject's raw files (O(touched tables)); anything else: no object scan (SQL verification only)."""
+    text = str(value).strip().lower() if value is not None else ""
+    if text in ("1", "true", "yes", "full"):
+        return "full"
+    return "scoped" if text == "scoped" else "off"
+
+
+def table_location(trino: TrinoClient, name: str) -> str | None:
+    """``bucket/prefix/`` of an Iceberg table, from its metadata log."""
+    catalog, schema, table = name.split(".")
+    metadata_log = fqn(catalog, schema, table)[:-1] + '$metadata_log_entries"'  # "c"."s"."t$metadata_log_entries"
+    path = trino.scalar(f"select file from {metadata_log} limit 1")
+    if not path or "/metadata/" not in path:
+        return None
+    return path.split("://", 1)[-1].rsplit("/metadata/", 1)[0] + "/"
+
+
 def lake_buckets(s3: S3Settings) -> list[str]:
     return [s3.raw_bucket if layer == "raw" else layer_bucket(layer) for layer in LAYERS]
 
@@ -234,7 +254,7 @@ def execute_request(
     reason: str,
     scope: str = "full",
     identifier: str | None = None,
-    verify_storage: bool = False,
+    verify_storage: bool | str = False,
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
     purge_s3: S3Settings | None = None,
@@ -268,6 +288,11 @@ def execute_request(
             files.update(r[0] for r in trino.execute(sql))
     report.raw_files = sorted(files)
     baselines = _baseline_tables(trino)
+    mode = verification_mode(verify_storage)
+    scan_prefixes = None
+    if mode == "scoped":  # before the work: Iceberg tables keep their location, files change
+        locations = [table_location(trino, name) for name in sorted(existing | set(baselines))]
+        scan_prefixes = [loc for loc in locations if loc] + [f"{s3.raw_bucket}/{p}" for p in report.raw_files]
 
     audit_table = _ensure_audit_table(trino)
     rq.stage_digest(report.erasure_id, report.subject_digest)
@@ -302,10 +327,12 @@ def execute_request(
 
         for bucket in lake_buckets(s3):
             report.purged_object_versions += purge_noncurrent(purge_fs, bucket)
-        if verify_storage:
+        if mode != "off":
             needles = [key] + ([identifier] if identifier else [])
             # the queue still holds the key (it is removed only after success): skip its files
-            report.storage_hits = scan_storage(purge_fs, lake_buckets(s3), needles, exclude=[rq.queue_location()])
+            report.storage_hits = scan_storage(
+                purge_fs, lake_buckets(s3), needles, exclude=[rq.queue_location()], prefixes=scan_prefixes
+            )
         if report.storage_hits:
             raise ErasureVerificationError(f"subject still present in objects: {report.storage_hits[:5]}")
         report.status = "completed"
@@ -375,7 +402,7 @@ def erase_subject(
     requested_by: str,
     reason: str,
     dry_run: bool = False,
-    verify_storage: bool = False,
+    verify_storage: bool | str = False,
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
 ) -> ErasureReport:
@@ -402,7 +429,7 @@ def erase_subject(
 
 def process_pending_requests(
     *,
-    verify_storage: bool = False,
+    verify_storage: bool | str = False,
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
     purge_s3: S3Settings | None = None,

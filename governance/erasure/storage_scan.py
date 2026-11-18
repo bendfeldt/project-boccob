@@ -68,19 +68,30 @@ def object_contains(path: str, data: bytes, needles: list[str]) -> bool:
     return _bytes_hit(data, needles)
 
 
-def scan_storage(fs: Any, buckets: list[str], needles: list[str], exclude: list[str] | None = None) -> list[str]:
+def scan_storage(
+    fs: Any,
+    buckets: list[str],
+    needles: list[str],
+    exclude: list[str] | None = None,
+    prefixes: list[str] | None = None,
+) -> list[str]:
     """Return every object version (current or noncurrent) that still contains one of the needles.
 
     Noncurrent versions are included: on a versioned bucket a deleted object is still readable
     by version id. Hits are reported as ``s3://bucket/key?versionId=...``. ``exclude`` lists
     ``bucket/key-prefix`` strings whose objects are not inspected (the erasure queue itself).
+    ``prefixes`` (``bucket/key-prefix``) limits the scan to those locations instead of whole buckets.
     """
     from lakehouse.objectstore import iter_versions, read_version
 
     needles = [n for n in needles if n]
+    if prefixes is None:
+        locations = [(bucket, "") for bucket in buckets]
+    else:
+        locations = sorted({tuple(p.split("/", 1)) if "/" in p else (p, "") for p in prefixes})
     hits = []
-    for bucket in buckets:
-        for version in iter_versions(fs, bucket):
+    for bucket, prefix in locations:
+        for version in iter_versions(fs, bucket, prefix):
             if version.is_delete_marker or any(f"{bucket}/{version.key}".startswith(e) for e in exclude or ()):
                 continue
             if object_contains(version.key, read_version(fs, bucket, version), needles):

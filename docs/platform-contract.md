@@ -122,7 +122,8 @@ to a mounted file; the dbt profile reads plain variables only.
 | `INGEST_START_DATE` | | `2026-01-01` | first daily partition |
 | `PURGE_S3_ACCESS_KEY_ID` | yes | `S3_ACCESS_KEY_ID` | **new** - key allowed to remove object versions: `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetObject`, `s3:GetObjectVersion`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on all four lakehouse buckets. Used by erasure, retention and maintenance; without it they fail (by design) on versioned buckets instead of leaving data behind |
 | `PURGE_S3_SECRET_ACCESS_KEY` | yes | | |
-| `ERASURE_VERIFY_STORAGE` | | `false` | after an erasure, scan every object version of all layer buckets for remains (slow, thorough; recommended in test/prod) |
+| `ERASURE_VERIFY_STORAGE` | | `false` | object scan after an erasure: `scoped` = every object version under the locations of the touched tables and the subject's raw files (cost grows with those tables; recommended for test/prod); `full` (or `true`) = every version of the four lake buckets, O(lake) per request - for audits and small lakes only; `false` = SQL verification only |
+| `PURGE_CREDENTIALS_SECRET` | | (unset) | **new** - name of a Kubernetes Secret with `PURGE_S3_ACCESS_KEY_ID` / `PURGE_S3_SECRET_ACCESS_KEY`. When set, the jobs `erasure`, `retention` and `iceberg_maintenance` add it to their run pods (`dagster-k8s/config` tag, `env_from`), so the purge credential can be removed from the environment shared by every run (audit N-3). Must be set on the code location deployment |
 | `INGEST_<SOURCE>_<OPTION>` | | source.yml | per-source option overrides |
 
 For TLS with the internal CA also set the generic variables honoured by the underlying libraries:

@@ -17,6 +17,17 @@ LAYER_GROUPS = (
     | dg.AssetSelection.tag("layer", "curated")
 )
 
+# Jobs that remove object versions (erasure, retention, maintenance) need the PURGE_S3_* credentials.
+# With PURGE_CREDENTIALS_SECRET set (name of a Kubernetes Secret holding them), only the run pods of
+# these jobs get that Secret (K8sRunLauncher per-job config), so the platform can drop the purge
+# credential from the environment shared by every run (audit N-3).
+_PURGE_SECRET = os.environ.get("PURGE_CREDENTIALS_SECRET", "").strip()
+PURGE_TAGS = (
+    {"dagster-k8s/config": {"container_config": {"env_from": [{"secret_ref": {"name": _PURGE_SECRET}}]}}}
+    if _PURGE_SECRET
+    else {}
+)
+
 # --- asset jobs ------------------------------------------------------------------------------
 
 ingest_jobs = [
@@ -123,13 +134,14 @@ def erasure_op(context: dg.OpExecutionContext, governance: GovernanceResource):
     return len(reports)
 
 
-@dg.job(description="Iceberg housekeeping for all layers", tags={"lakehouse/kind": "maintenance"})
+@dg.job(description="Iceberg housekeeping for all layers", tags={"lakehouse/kind": "maintenance", **PURGE_TAGS})
 def iceberg_maintenance():
     iceberg_maintenance_op()
 
 
 @dg.job(
-    description="Time based retention (governance/retention.yml + dbt meta.gdpr)", tags={"lakehouse/kind": "retention"}
+    description="Time based retention (governance/retention.yml + dbt meta.gdpr)",
+    tags={"lakehouse/kind": "retention", **PURGE_TAGS},
 )
 def retention():
     retention_op(after_migrations=migrate_op())
@@ -137,7 +149,7 @@ def retention():
 
 @dg.job(
     description="GDPR art. 17: erase queued data subjects from all layers and purge history",
-    tags={"lakehouse/kind": "erasure"},
+    tags={"lakehouse/kind": "erasure", **PURGE_TAGS},
 )
 def erasure():
     erasure_op(after_migrations=migrate_op())

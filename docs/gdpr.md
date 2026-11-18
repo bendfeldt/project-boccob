@@ -186,9 +186,11 @@ What happens, in order (`governance/erasure/plan.py`, derived from dbt meta and 
     (`PURGE_S3_*` credentials with `s3:DeleteObjectVersion`); the job fails rather than report success
     if it lacks the permission. This also ends the object-version recovery window for unrelated
     deleted files - Iceberg never overwrites files, so only already deleted objects are affected.
-11. With `--verify-storage` / `ERASURE_VERIFY_STORAGE` every object *version* in the four buckets is
-    decoded (Parquet, Avro manifests, text) and searched for the identifier and the key. The files of
-    the request queue are skipped: they still hold the key, by design, until step 13.
+11. With `--verify-storage` / `ERASURE_VERIFY_STORAGE` object *versions* are decoded (Parquet, Avro
+    manifests, text) and searched for the identifier and the key: `scoped` covers every version under
+    the touched tables' locations and the subject's raw files, `full` every version of the four
+    buckets (O(lake) per request: audits and small lakes only). The files of the request queue are
+    skipped: they still hold the key, by design, until step 13.
 12. An audit row is written to `curated.audit.erasure_log`: erasure id, who requested it, reason,
     status, executing principal, affected tables and counts, and a keyed digest of the subject
     (lets the controller later prove that a given identifier was erased; identifies nobody by itself).

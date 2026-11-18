@@ -35,7 +35,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--process-pending", action="store_true", help="execute all queued requests")
     parser.add_argument(
-        "--verify-storage", action="store_true", help="after purging, scan the object store for remains (slow)"
+        "--verify-storage",
+        nargs="?",
+        const="full",
+        default="off",
+        choices=["off", "scoped", "full"],
+        help="after purging, scan object versions for remains: scoped = touched tables and raw files, "
+        "full = every version of the four lake buckets (slow); default off",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")

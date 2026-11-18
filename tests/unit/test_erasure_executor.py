@@ -39,6 +39,8 @@ class FakeTrino:
         self.statements.append(sql)
         if "information_schema" in sql:
             return []
+        if "$metadata_log_entries" in sql:
+            return [["s3://lakehouse-clean/iceberg/s/t-1234/metadata/00001-abc.metadata.json"]]
         if sql.startswith("insert into") and "erasure_log" in sql:
             return [[self.audit_rows]]
         if sql.startswith("select request_id"):
@@ -79,8 +81,8 @@ def env(monkeypatch):
             ],
         )
 
-    def scan(fs, buckets, needles, exclude=None):
-        scans.append({"needles": needles, "exclude": exclude})
+    def scan(fs, buckets, needles, exclude=None, prefixes=None):
+        scans.append({"needles": needles, "exclude": exclude, "prefixes": prefixes})
         return hits.get(needles[0], [])
 
     monkeypatch.setattr(ex, "build_plan", plan)
@@ -103,8 +105,8 @@ def pending(*rows):
     return [(req, key, "subject_key", "dpo", "ticket", "full") for req, key in rows]
 
 
-def run(trino):
-    return ex.process_pending_requests(verify_storage=True, trino=trino, s3=FakeS3(), purge_s3=FakeS3())
+def run(trino, verify="full"):
+    return ex.process_pending_requests(verify_storage=verify, trino=trino, s3=FakeS3(), purge_s3=FakeS3())
 
 
 def test_successful_request_is_dequeued_only_at_the_end(env):
@@ -116,7 +118,15 @@ def test_successful_request_is_dequeued_only_at_the_end(env):
     dequeue = next(i for i, s in enumerate(trino.statements) if s.startswith("delete from") and "erasure_requests" in s)
     assert audit < dequeue, "the request leaves the queue only after the audit row exists"
     # the storage scan skips the queue's own files: they still hold the key at that point
-    assert env["scans"] == [{"needles": [KEY_A], "exclude": [QUEUE_LOCATION]}]
+    assert env["scans"] == [{"needles": [KEY_A], "exclude": [QUEUE_LOCATION], "prefixes": None}]
+
+
+def test_scoped_verification_scans_only_the_touched_tables(env):
+    """N-1: `scoped` reads the locations of the touched tables, not every version of the lake."""
+    run(FakeTrino(pending((REQ_A, KEY_A))), verify="scoped")
+    assert env["scans"][0]["prefixes"] == ["lakehouse-clean/iceberg/s/t-1234/"]
+    assert ex.verification_mode("true") == ex.verification_mode(True) == "full"
+    assert ex.verification_mode("false") == ex.verification_mode(None) == "off"
 
 
 def test_late_failure_keeps_the_request_and_the_batch_continues(env):
