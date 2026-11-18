@@ -26,6 +26,7 @@ The job must run exclusively (no concurrent pipeline writes): steps 6-8 use a ze
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -352,7 +353,10 @@ def execute_request(
         else:
             log.error("erasure %s: audit row could not be written either: %s", report.erasure_id, exc)
     finally:
-        trino.execute(f"delete from {rq.digest_table_sql()} where erasure_id = ?", [report.erasure_id])
+        try:  # the staged digest equals the one in the audit log; leaving it behind leaks nothing new
+            trino.execute(f"delete from {rq.digest_table_sql()} where erasure_id = ?", [report.erasure_id])
+        except Exception as exc:
+            log.error("erasure %s: staged digest not removed: %s", report.erasure_id, exc)
 
     if failure is None:
         try:
@@ -367,7 +371,8 @@ def execute_request(
         except Exception as exc:  # the request is still queued (status unchanged): it is retried anyway
             log.error("erasure request %s: could not mark it failed: %s", request_id, exc)
         log.error("erasure request %s failed (kept in the queue): %s", request_id, report.error)
-        failure.erasure_report = report  # type: ignore[attr-defined] - read by process_pending_requests
+        with contextlib.suppress(AttributeError):  # read by process_pending_requests
+            failure.erasure_report = report  # type: ignore[attr-defined]
         raise failure
     return report
 
