@@ -11,7 +11,7 @@ in the record of processing activities.
 | Masking by role | OPA policy `governance/policies/trino` + generated classification data | Trino OPA plugin (column masks) |
 | Layer based access | OPA policy + `lakehouse/config/data.yaml` | Trino OPA plugin |
 | Pseudonymised keys from clean onward | index stage (`ingestion/framework/pseudonym.py`) | dbt tests `pseudonym_format` |
-| CPR confined to one column | `clean.<source>.citizens.cpr_number` | integration test (no CPR column or value in consolidated/curated) |
+| CPR confined to the raw layer | native files and the masked `payload` of the raw index | integration test (no CPR column or value in clean, consolidated or curated) |
 | Retention | `governance/retention.yml` + dbt `meta.gdpr` | Dagster job `retention` |
 | Right to erasure | `governance/erasure` | CLI `lakehouse-erase`, Dagster job `erasure`, audit table |
 | Disclosure control for published aggregates | `dp_payment_summary.is_small_cell` + row filter | Trino OPA plugin (row filters) |
@@ -51,10 +51,11 @@ Groups are the Keycloak groups of the architecture contract.
 
 | Group | raw | clean | consolidated | curated | Notes |
 |---|---|---|---|---|---|
-| `platform-admin` | rw | rw | rw | rw | no automatic PII visibility; may kill queries, read system information |
-| `data-engineer` | rw | rw | rw | rw | incl. table maintenance procedures |
+| `platform-admin` | rw | rw | rw | rw | no automatic PII visibility; may kill queries, read system information; no writes to protected schemas |
+| `data-engineer` | rw | rw | rw | rw | incl. table maintenance procedures; reads `curated.keystore`; no writes to protected schemas; cannot lower the retention floor |
 | `analyst` | - | - | - | read | not `curated.keystore`, not `curated.audit` |
-| `auditor` | read | read | read | read | read-only, sees all users' queries (`system.runtime`) |
+| `auditor` | read | read | read | read | read-only, sees all users' queries (`system.runtime`), reads the erasure log and queue |
+| `lakehouse-service` | rw | rw | rw | rw | pipeline service accounts only (`svc-dagster`): the only writer of the protected schemas `curated.keystore`, `curated.audit`, `raw.governance`, and the only principal that may lower the snapshot/orphan retention floor |
 | `pii-reader` | | | | | modifier only: removes column masks and row filters marked exempt; grants no access by itself |
 
 * Everything not explicitly allowed is denied; users without one of these groups cannot run queries.
@@ -80,9 +81,10 @@ Groups are the Keycloak groups of the architecture contract.
 * Which field of a record is a person identifier is declared per entity in the source spec
   (`identifiers: {cpr: cpr}`); the record itself is stored untouched.
 * From clean onward, tables are joined on the pseudonymised key (`citizen_id`, `person_id`). The CPR
-  number exists in exactly one governed column, `clean.borgerportal.citizens.cpr_number`, for the
-  purposes that legally require it; it is classified `direct` + `cpr`, masked, and not propagated to
-  consolidated or curated. The dimension carries `birth_year` instead of the birth date.
+  number is not carried into clean (data minimisation): it exists only in the raw layer - the native
+  files and the raw index `payload`, which is masked for everyone without `pii-reader`. A source whose
+  clean layer must keep a CPR column for a legal purpose declares it with `cpr: true` (classified
+  `direct` or `sensitive`, masked). The dimension carries `birth_year` instead of the birth date.
 * Pseudonymised data is still personal data. The keys are classified `indirect` and deleted on erasure.
 * Pepper rotation changes every key. Procedure: set the new pepper, re-index all retained loads
   (`lakehouse-ingest index <source> --load-id <id> --reindex`), full-refresh dbt. Surrogate keys of
@@ -102,12 +104,17 @@ Groups are the Keycloak groups of the architecture contract.
 | raw index rows | 90 days after indexing |
 | `clean.borgerportal.payments`, `curated.borgerservice.fact_payment` | 5 years after payment / booking date |
 | `clean.borgerportal.cases` | 5 years after closing; open cases stay |
-| master data (`citizens`, `person`, `dim_citizen`) | no time rule: kept while the person is registered, removed by erasure. The retention report lists these tables under `no_time_rule` so the gap is visible |
+| master data (`citizens`, `person`, `dim_citizen`) | kept while the person is registered; one year after deregistration (latest state `is_deleted`, meta `gdpr.deregistration`) the retention job queues the person for erasure, which removes them from every layer |
 | Iceberg snapshots (time travel) | raw 3 days, clean/consolidated 7 days, curated 14 days |
 
-The `retention` job deletes expired rows and files (`lakehouse-retention --dry-run` reports first).
-Deleted rows remain reachable through older snapshots until `iceberg_maintenance` expires them, so
-the effective retention is the rule plus the snapshot window. The periods above are placeholders
+The `retention` job deletes expired rows and files (`lakehouse-retention --dry-run` reports first)
+and queues deregistered persons for erasure. Deleted rows remain reachable through older snapshots
+until `iceberg_maintenance` expires them, and - on versioned buckets - the expired files remain as
+noncurrent object versions until the maintenance step `purge_noncurrent_versions` removes them once
+they have been noncurrent longer than the layer's orphan file retention. The effective retention is
+therefore the rule plus the snapshot window plus the orphan file window (raw 3+3 days, clean and
+consolidated 7+7, curated 14+7 with the demo values). Landing files deleted by retention are removed
+with all their versions at once. The periods above are placeholders
 for the demo; the controller sets the real ones.
 
 ## Right to erasure (GDPR art. 17)
@@ -117,15 +124,22 @@ ERASURE_IDENTIFIER=<cpr> lakehouse-erase --requested-by dpo@... --reason "case 4
 ERASURE_IDENTIFIER=<cpr> lakehouse-erase --requested-by dpo@... --reason "case 4711" --submit
 ```
 
-`--submit` queues the request (only the pseudonymised key is stored, in `curated.audit`); the
-Dagster job `erasure` executes the queue at night under the writer pool. Without `--submit` the
-erasure runs immediately. The identifier is read from the environment or stdin, never from the
-command line, and never enters Dagster run configuration or events.
+`--submit` queues the request: only the pseudonymised key is stored, in `raw.governance.erasure_requests`
+(written with pyiceberg, readable by auditors and the pipeline only); the Dagster job `erasure` executes
+the queue at night under the writer pool. Without `--submit` the request is queued and executed
+immediately; a dry run queues, counts and removes the request again. The identifier is read from the
+environment or stdin, never from the command line, and never enters Dagster run configuration or events.
+
+**No identifier in SQL.** Trino query text is archived (WORM) by the platform, so anything in it can
+never be erased. Every erasure statement references the subject only as
+`(select subject_key from raw.governance.erasure_requests where request_id = '<uuid>')`; the key, the
+CPR number and the pepper stay in Python. The integration test checks the query history for this.
 
 What happens, in order (`governance/erasure/plan.py`, derived from dbt meta and the source specs):
 
-1. The identifier is turned into the pseudonymised key.
-2. The native raw files containing the subject are located through the raw index.
+1. The identifier is turned into the pseudonymised key and staged in the request queue.
+2. The native raw files containing the subject are located through the raw index; stale dbt work
+   tables (`__dbt_tmp`, `__stage`, `__dbt_backup`, left by failed runs) are dropped.
 3. `raw.<source>.<entity>`: the subject's rows are deleted.
 4. Facts with `erasure: anonymise` keep their rows (e.g. bookkeeping duty) but `anonymise_columns`
    are set to NULL; they keep pointing at the member's surrogate keys.
@@ -142,15 +156,22 @@ What happens, in order (`governance/erasure/plan.py`, derived from dbt meta and 
    subject's key or CPR number); a table that became empty is replaced by itself for the same
    reason; `expire_snapshots` and `remove_orphan_files` with zero retention then remove every
    older data file, delete file and manifest.
-9. Verification: all tables are queried again; with `--verify-storage` / `ERASURE_VERIFY_STORAGE`
-   every object in the four layer buckets is decoded and searched for the identifier and the key.
-10. An audit row is written to `curated.audit.erasure_log`: erasure id, who requested it, reason,
+9. Verification in SQL: every planned table is queried again (through the queued key). Then the
+   request is removed from the queue and the queue's history is purged as in step 8.
+10. Object versions: on a versioned bucket every file deleted in steps 2-9 is still readable by
+    version id. All noncurrent versions and delete markers in the four lakehouse buckets are removed
+    (`PURGE_S3_*` credentials with `s3:DeleteObjectVersion`); the job fails rather than report success
+    if it lacks the permission. This also ends the object-version recovery window for unrelated
+    deleted files - Iceberg never overwrites files, so only already deleted objects are affected.
+11. With `--verify-storage` / `ERASURE_VERIFY_STORAGE` every object *version* in the four buckets is
+    decoded (Parquet, Avro manifests, text) and searched for the identifier and the key.
+12. An audit row is written to `curated.audit.erasure_log`: erasure id, who requested it, reason,
     status, executing principal, affected tables and counts, and a keyed digest of the subject
     (lets the controller later prove that a given identifier was erased; identifies nobody by itself).
 
 Limits and operating rules:
 
-* Run exclusively. Step 8 uses a zero retention window; a concurrent writer could lose uncommitted
+* Run exclusively. Steps 8-10 use a zero retention window; a concurrent writer could lose uncommitted
   files. The Dagster pool `lakehouse_writer` (limit 1) guarantees this for scheduled work.
 * Time travel is lost for the touched tables (that is the point).
 * Deleting whole native files removes the raw copy of other persons' records in the same files
@@ -160,6 +181,6 @@ Limits and operating rules:
   surrogate keys. Erasure must also be carried out in the source system; this tool covers the
   lakehouse.
 * Outside the scope of this tool: object store replicas and backups (`platform-backup`), central
-  logs, and consumers' extracts. They need their own retention so that erased data ages out.
+  logs (which contain no subject keys from this tooling, see above), and consumers' extracts. They need their own retention so that erased data ages out.
 * Whether a fact may be kept in anonymised form (`erasure: anonymise`) or must be deleted
   (`erasure: delete`) is a per-table decision of the controller, expressed in the model's meta.

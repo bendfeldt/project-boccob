@@ -75,8 +75,8 @@ index, loading only rows indexed since the previous run.
 * deduplicate on the natural key (newest load wins)
 * denormalise (address into the citizen row, case type into the payment row)
 * person identifiers replaced by the pseudonymised key from `_subject_keys`; the CPR number itself
-  is kept in exactly one column, `clean.borgerportal.citizens.cpr_number`, classified and masked
-* data quality tests: not null, uniqueness, accepted values, relationships, key and CPR shape
+  is not carried into clean (it stays in the raw layer only)
+* data quality tests: not null, uniqueness, accepted values, relationships, pseudonym format
 * lineage columns `_raw_file`, `_raw_row`, `_load_id`, `_loaded_at`, `_invocation_id`
 
 `citizens` keeps every delivered state (one row per citizen and change timestamp); that history is

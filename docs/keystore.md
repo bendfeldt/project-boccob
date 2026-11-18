@@ -66,8 +66,12 @@ from {{ ref('payments') }} p
 * `keystore_register_inferred` (pre-hook) handles late-arriving dimension members: a business key
   that occurs in the fact source but has no key yet gets an *inferred* key and a placeholder row in
   the dimension, so the fact is loaded now. When the master data arrives, the earliest version
-  adopts that key (`member_type` becomes `regular`, `adopted_at` is set) - the fact rows never need
-  to be touched.
+  adopts that key (`member_type` becomes `regular`, `adopted_at` is set). If the master data arrives
+  with several versions and a fact's event falls into a later one, the fact must move to that
+  version: `keystore_rekey_adopted(...)` in the fact's incremental filter re-selects every fact row
+  whose key was adopted after the row was written, and `dim_join` assigns the version valid at the
+  event time (test `scd2_version_valid_at_event`). Changes to *regular* members that are backdated
+  before already loaded facts are not re-keyed (limit).
 * `keystore_mark_used` (post-hook) stamps `key_last_used_in_fact_at` for every key referenced by the
   rows written in this invocation (`_invocation_id` from `audit_columns()`).
 

@@ -56,14 +56,16 @@ instance setting) so that the erasure job, maintenance and the keystore have a s
   `oras` as OCI artifact (config media type `application/vnd.oci.image.config.v1+json`, one layer
   `application/vnd.oci.image.layer.v1.tar+gzip`) - the layout OPA's OCI bundle downloader expects.
   The same tarball is available as a file in `dist/opa/bundle.tar.gz` (+ `.sha256`).
-* Trino `access-control.properties` (OPA service assumed at `http://opa.query.svc:8181`):
+* Trino `access-control.properties` (as deployed: OPA served over **HTTPS** at `https://opa.query.svc:8181`
+  with a certificate from the platform PKI, reachable only from the Trino coordinator; the harness uses
+  plain HTTP inside its podman network):
 
 ```properties
 access-control.name=opa
-opa.policy.uri=http://opa.query.svc:8181/v1/data/trino/allow
-opa.policy.batched-uri=http://opa.query.svc:8181/v1/data/trino/batch
-opa.policy.row-filters-uri=http://opa.query.svc:8181/v1/data/trino/rowFilters
-opa.policy.batch-column-masking-uri=http://opa.query.svc:8181/v1/data/trino/batchColumnMasks
+opa.policy.uri=https://opa.query.svc:8181/v1/data/trino/allow
+opa.policy.batched-uri=https://opa.query.svc:8181/v1/data/trino/batch
+opa.policy.row-filters-uri=https://opa.query.svc:8181/v1/data/trino/rowFilters
+opa.policy.batch-column-masking-uri=https://opa.query.svc:8181/v1/data/trino/batchColumnMasks
 ```
 
   (`opa.policy.column-masking-uri=.../v1/data/trino/columnMask` is the non-batch alternative; Trino
@@ -71,11 +73,16 @@ opa.policy.batch-column-masking-uri=http://opa.query.svc:8181/v1/data/trino/batc
   `opa.allow-permission-management-operations` must stay `false`.
 * The policy decides on `input.context.identity.groups`. Trino must therefore resolve the Keycloak
   groups of a user (group provider), with exactly these names:
-  `platform-admin`, `data-engineer`, `analyst`, `pii-reader`, `auditor`.
-  Where Trino cannot resolve groups for a principal (service accounts), the platform can overlay
-  `data.lakehouse.config.principals` = `{"<user>": {"groups": [...]}}` in OPA.
-* The service account used by Dagster/dbt (`TRINO_USER`) must be in **`data-engineer` and
-  `pii-reader`** - otherwise it would transform masked values.
+  `platform-admin`, `data-engineer`, `analyst`, `pii-reader`, `auditor`, `lakehouse-service`.
+  Service accounts get their groups from static entries in Trino's file group provider (as deployed:
+  the IaC variable `trino_service_accounts`). The policy still supports an OPA data overlay
+  `data.lakehouse.config.principals` = `{"<user>": {"groups": [...]}}` as an alternative; on the
+  platform it stays empty.
+* The service account used by Dagster/dbt (`TRINO_USER`, `svc-dagster`) must be in **`data-engineer`,
+  `pii-reader` and `lakehouse-service`**. Without `pii-reader` it would transform masked values; without
+  `lakehouse-service` it cannot write the protected schemas `curated.keystore`, `curated.audit` and
+  `raw.governance` (erasure queue) or lower the snapshot retention floor (maintenance, erasure).
+  No human account may be in `lakehouse-service`.
 
 ## 2. Environment variables expected by the image
 
@@ -86,7 +93,7 @@ to a mounted file; the dbt profile reads plain variables only.
 | Variable | Secret | Default | Meaning |
 |---|---|---|---|
 | `S3_ENDPOINT_URL` | | (AWS) | RustFS S3 endpoint, e.g. `https://rustfs.storage.svc:9000` |
-| `S3_ACCESS_KEY_ID` | yes | | access key with read/write on the raw bucket (dlt, erasure, retention) and read on all layer buckets if `ERASURE_VERIFY_STORAGE=true` |
+| `S3_ACCESS_KEY_ID` | yes | | access key with read/write on the raw bucket (dlt, erasure queue) and read on all layer buckets (as deployed: S3 user `lakehouse-orchestration`) |
 | `S3_SECRET_ACCESS_KEY` | yes | | |
 | `S3_REGION` | | `us-east-1` | region name configured in RustFS / Polaris |
 | `RAW_BUCKET` | | `lakehouse-raw` | landing bucket |
@@ -97,8 +104,8 @@ to a mounted file; the dbt profile reads plain variables only.
 | `POLARIS_SCOPE` | | `PRINCIPAL_ROLE:ALL` | |
 | `POLARIS_OAUTH2_SERVER_URI` | | derived from `POLARIS_URI` | token endpoint when it is not Polaris' own |
 | `RAW_CATALOG` `CLEAN_CATALOG` `CONSOLIDATED_CATALOG` `CURATED_CATALOG` | | `raw` `clean` `consolidated` `curated` | Polaris/Trino catalog per layer |
-| `TRINO_HOST` | | | Trino coordinator host |
-| `TRINO_PORT` | | `8443` (https) / `8080` (http) | |
+| `TRINO_HOST` | | | Trino host (as deployed: `trino.<base_domain>` through Traefik) |
+| `TRINO_PORT` | | `8443` (https) / `8080` (http) | as deployed: `443` |
 | `TRINO_USER` | | | service account, e.g. `svc-dagster` |
 | `TRINO_HTTP_SCHEME` | | `https` (python) | `http` only without authentication |
 | `DBT_TARGET` | | `default` | dbt authentication profile: `default` (none), `password`, `jwt` |
@@ -110,7 +117,9 @@ to a mounted file; the dbt profile reads plain variables only.
 | `SCHEDULES_ENABLED` | | `false` | start schedules automatically |
 | `SCHEDULE_TIMEZONE` | | `Europe/Copenhagen` | |
 | `INGEST_START_DATE` | | `2026-01-01` | first daily partition |
-| `ERASURE_VERIFY_STORAGE` | | `false` | after an erasure, scan all layer buckets for remains (slow, thorough) |
+| `PURGE_S3_ACCESS_KEY_ID` | yes | `S3_ACCESS_KEY_ID` | **new** - key allowed to remove object versions: `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetObject`, `s3:GetObjectVersion`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on all four lakehouse buckets. Used by erasure, retention and maintenance; without it they fail (by design) on versioned buckets instead of leaving data behind |
+| `PURGE_S3_SECRET_ACCESS_KEY` | yes | | |
+| `ERASURE_VERIFY_STORAGE` | | `false` | after an erasure, scan every object version of all layer buckets for remains (slow, thorough; recommended in test/prod) |
 | `INGEST_<SOURCE>_<OPTION>` | | source.yml | per-source option overrides |
 
 For TLS with the internal CA also set the generic variables honoured by the underlying libraries:
@@ -127,8 +136,12 @@ the harness files in `tests/integration/` are a working reference configuration.
 
 **Object storage (RustFS)**
 * Buckets `lakehouse-raw`, `lakehouse-clean`, `lakehouse-consolidated`, `lakehouse-curated`.
-* No object lock in compliance mode on `lakehouse-raw` beyond the raw retention window: the erasure
-  and retention jobs must be able to delete native files (they delete all object versions).
+* No object lock on the lakehouse buckets: erasure and retention must be able to delete object versions.
+* Versioning may be on (it is on the platform). The solution does not rely on lifecycle rules: erasure
+  removes every noncurrent version and delete marker in the four buckets; the maintenance job
+  (`purge_noncurrent_versions`) removes versions that have been noncurrent for longer than the layer's
+  orphan file retention (`governance/retention.yml`); retention deletes landing files with all versions.
+  A platform lifecycle with `NoncurrentVersionExpiration` is a welcome second line of defence.
 
 **Polaris**
 * One internal catalog per layer, named as the layer, with
@@ -151,20 +164,31 @@ the harness files in `tests/integration/` are a working reference configuration.
 * An authentication method for the service account (`password` or `jwt` dbt target). A static JWT
   expires: prefer password/certificate authentication for `svc-dagster`, or provide token refresh.
 * The jobs lower `expire_snapshots_min_retention` / `remove_orphan_files_min_retention` per session
-  (catalog session properties); no catalog level change is needed. The policy only lets principals
-  with write access set them.
+  (catalog session properties); no catalog level change is needed. The policy only lets members of
+  `lakehouse-service` set them.
 
 **Dagster**
 * User code deployment from the image; run launcher pods with the same image and environment.
+* Compute logs: run pods log to stdout. An S3 compute log manager would need `dagster-aws` in the image,
+  which is not included yet (open item; it is a small dependency, to be added together with the
+  platform configuration that wants it).
 * Pool `lakehouse_writer` limited to 1.
 * Egress (NetworkPolicy) from the orchestration namespace to Trino, Polaris, RustFS and the Dagster database.
 
 **Secrets (OpenBao KV -> ESO -> Secret -> env)**
-`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `POLARIS_CLIENT_ID`, `POLARIS_CLIENT_SECRET`,
-`TRINO_PASSWORD` or `TRINO_JWT_TOKEN`, `PSEUDONYM_PEPPER`.
+`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `PURGE_S3_ACCESS_KEY_ID`, `PURGE_S3_SECRET_ACCESS_KEY`,
+`POLARIS_CLIENT_ID`, `POLARIS_CLIENT_SECRET`, `TRINO_PASSWORD` or `TRINO_JWT_TOKEN`, `PSEUDONYM_PEPPER`.
 
 **Audit**
-* The pepper never appears in SQL text (pseudonyms are computed in the index stage), so Trino query
-  logs can be shipped to the central audit store as they are.
+* What the solution puts into Trino query text (which the platform archives WORM):
+  - never the pepper (pseudonyms are computed in the index stage, in Python);
+  - never a subject key, CPR number or other identifier from the erasure, retention or maintenance
+    tooling: erasure statements reference the subject only as
+    `(select subject_key from raw.governance.erasure_requests where request_id = '<uuid>')`, the queue
+    row is written through pyiceberg (not Trino), and deregistered subjects are queued with
+    `INSERT ... SELECT`. Verified in the integration test against `system.runtime.queries`;
+  - opaque request ids, table names, row counts and timestamps.
+  Ad-hoc queries of people (e.g. a pii-reader filtering on a literal CPR number) are outside the
+  solution's control; the platform audit sink redacts 64-hex and CPR-shaped literals (IaC, audit H-1).
 * Erasure executions are recorded in `curated.audit.erasure_log` (no identifiers) and logged as JSON
   on stdout of the run pod.
