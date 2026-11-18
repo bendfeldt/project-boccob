@@ -71,7 +71,22 @@ def retention_op(context: dg.OpExecutionContext, config: RetentionConfig, govern
 
 @dg.op(pool=WRITER_POOL, description="Execute queued right-to-erasure requests (no identifiers in run config or logs)")
 def erasure_op(context: dg.OpExecutionContext, governance: GovernanceResource):
-    reports = governance.process_erasure_requests()
+    from governance.erasure.executor import ErasureBatchError
+
+    try:
+        reports = governance.process_erasure_requests()
+    except ErasureBatchError as exc:
+        # every request was attempted; the failed ones stay queued (status 'failed') for the next run
+        failed = [r for r in exc.reports if r.status != "completed"]
+        raise dg.Failure(
+            description=f"{len(failed)} of {len(exc.reports)} erasure request(s) failed and stay queued",
+            metadata={
+                "requests_processed": len(exc.reports),
+                "failed_request_ids": [r.request_id for r in failed],
+                "errors": [r.error or "" for r in failed],
+                "completed_erasure_ids": [r.erasure_id for r in exc.reports if r.status == "completed"],
+            },
+        ) from exc
     context.add_output_metadata(
         {
             "requests_processed": len(reports),

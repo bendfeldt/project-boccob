@@ -147,10 +147,13 @@ def queue_deregistered(trino: TrinoClient, plan: RetentionPlan, *, dry_run: bool
         if dry_run:
             count = trino.scalar(f"select count(*) from ({d.select_sql})")
         else:
+            # scope 'deregistration': identifiers go now, bookkeeping rows stay anonymised (docs/gdpr.md)
             result = trino.execute(
-                f"insert into {queue_table_sql()} "
+                f"insert into {queue_table_sql()} (request_id, subject_key, identifier_type, requested_by, "
+                "reason, requested_at, scope, status, attempts, updated_at) "
                 "select cast(uuid() as varchar), subject, 'subject_key', 'retention-policy', "
-                f"'{d.reason}', current_timestamp from ({d.select_sql})"
+                f"'{d.reason}', current_timestamp, 'deregistration', 'pending', 0, current_timestamp "
+                f"from ({d.select_sql})"
             )
             count = result[0][0] if result and result[0] else 0
         counts.append({"table": d.table, "queued_for_erasure": count})
