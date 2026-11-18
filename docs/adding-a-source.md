@@ -69,7 +69,8 @@ records in `raw.hr_system.<entity>`.
 2. One clean model per entity, using the helpers in `macros/utils/raw_parsing.sql`:
 
    ```sql
-   {{ config(materialized='incremental', incremental_strategy='merge', unique_key='employee_id') }}
+   {{ config(materialized='incremental', incremental_strategy='merge', unique_key='employee_id',
+             on_schema_change='append_new_columns') }}
    with raw as (
      select {{ raw_columns() }} from {{ source('raw_hr_system', 'employees') }} {{ raw_incremental_filter() }}
    )
@@ -85,6 +86,9 @@ records in `raw.hr_system.<entity>`.
 5. Optional: add a branch to a consolidated entity (e.g. `consolidated.party.person`), and
    dimensions/facts in curated (docs/keystore.md).
 6. `make classification` to regenerate the OPA data, `make test`, `make lint`.
+7. Incremental models use `on_schema_change='append_new_columns'`. Once a model is released, any
+   non-additive change of it (drop, rename, retype) needs a migration - see
+   [releases.md](releases.md); a full refresh is refused outside dev.
 
 ## 4. What you get without further work
 

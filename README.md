@@ -7,14 +7,14 @@ this repository only through two published artifacts, see [docs/platform-contrac
 
 ```
 ingestion/       dlt framework (LAND native files, INDEX schema-on-read) + sources/<name>/
-transform/       dbt project: clean, consolidated, curated, keystore macros, tests
+transform/       dbt project: clean, consolidated, curated, keystore macros, tests, migrations/
 governance/      OPA policies for Trino, PII classification, erasure, retention, Iceberg maintenance
 orchestration/   Dagster code location: assets, checks, jobs, schedules
 images/          Containerfile of the code location image
 lakehouse/       shared settings (environment only), Trino client, object store helpers
 scripts/         every operation as a bash script; the Makefile wraps them
 tests/           unit tests and the podman integration harness
-docs/            data-layers, keystore, gdpr, adding-a-source, platform-contract
+docs/            data-layers, keystore, gdpr, adding-a-source, releases, platform-contract
 ```
 
 ## Quick start
@@ -56,6 +56,7 @@ Read more:
 * [docs/keystore.md](docs/keystore.md) - stable integer surrogate keys, SCD2/SCD1, inferred members, limits
 * [docs/gdpr.md](docs/gdpr.md) - classification, masking, pseudonymisation, CPR, retention, erasure
 * [docs/adding-a-source.md](docs/adding-a-source.md) - a new source in one YAML file and one function
+* [docs/releases.md](docs/releases.md) - schema evolution without data loss: migrations, release procedure, break-glass
 * [docs/platform-contract.md](docs/platform-contract.md) - artifacts, environment variables, platform requirements
 
 ## Building and publishing the artifacts

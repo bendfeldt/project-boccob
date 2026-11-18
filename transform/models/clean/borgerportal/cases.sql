@@ -3,7 +3,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key='case_id',
-    on_schema_change='fail'
+    on_schema_change='append_new_columns'
   )
 }}
 -- Latest known state of every case.

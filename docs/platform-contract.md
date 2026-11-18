@@ -29,7 +29,7 @@ service configurations. Nothing else is shared; there are no cross-repository fi
 | Code location module | `orchestration.definitions` (attribute `defs`) |
 | User | uid/gid `10001`, no shell, no capabilities needed |
 | Root filesystem | read-only capable; **mount a writable `emptyDir` on `/tmp`** (dbt target/logs, dlt working dir, `HOME`) |
-| CLI entry points | `lakehouse-ingest`, `lakehouse-erase`, `lakehouse-retention`, `lakehouse-maintain`, `lakehouse-pii`, `dbt`, `dagster` |
+| CLI entry points | `lakehouse-ingest`, `lakehouse-erase`, `lakehouse-retention`, `lakehouse-maintain`, `lakehouse-migrate`, `lakehouse-pii`, `dbt`, `dagster` |
 | Base images | pinned by digest in `images/dagster-code-location/Containerfile`; overridable build args `PYTHON_IMAGE`, `UV_IMAGE`, `UV_DEFAULT_INDEX` for mirrored/air-gapped builds |
 
 Run pods launched by Dagster (K8sRunLauncher) must use the same image and the same environment
@@ -39,11 +39,12 @@ Dagster jobs, schedules (all `STOPPED` unless `SCHEDULES_ENABLED=true`):
 
 | Job | Schedule (Europe/Copenhagen) | Purpose |
 |---|---|---|
-| `daily_refresh` (daily partitions) | 02:15 | land + index all sources, dbt build with tests |
+| `daily_refresh` (daily partitions) | 02:15 | land + index all sources, schema migrations, dbt build with tests |
 | `ingest_<source>` (daily partitions) | - | only the two ingestion stages of one source |
-| `transform` | - | dbt build only |
-| `erasure` | 00:30 | process queued right-to-erasure requests |
-| `retention` | 01:00 | apply the retention policy |
+| `transform` | - | schema migrations, then dbt build |
+| `migrate` | - | apply pending schema migrations only - run once after deploying a release (docs/releases.md) |
+| `erasure` | 00:30 | schema migrations, then process queued right-to-erasure requests; fails (after processing all) when one request failed - the failed ones stay queued |
+| `retention` | 01:00 | schema migrations, then apply the retention policy |
 | `iceberg_maintenance` | Sunday 04:00 | optimize, expire snapshots, remove orphan files |
 
 All assets and ops that write use the Dagster concurrency pool **`lakehouse_writer`**. The platform
@@ -80,8 +81,9 @@ opa.policy.batch-column-masking-uri=https://opa.query.svc:8181/v1/data/trino/bat
   platform it stays empty.
 * The service account used by Dagster/dbt (`TRINO_USER`, `svc-dagster`) must be in **`data-engineer`,
   `pii-reader` and `lakehouse-service`**. Without `pii-reader` it would transform masked values; without
-  `lakehouse-service` it cannot write the protected schemas `curated.keystore`, `curated.audit` and
-  `raw.governance` (erasure queue) or lower the snapshot retention floor (maintenance, erasure).
+  `lakehouse-service` it cannot write the protected schemas `curated.keystore`, `curated.audit`
+  (erasure log, `schema_migrations`) and `raw.governance` (erasure queue) or lower the snapshot
+  retention floor (maintenance, erasure, migrations with `@purge-history`).
   No human account may be in `lakehouse-service`.
 
 ## 2. Environment variables expected by the image
@@ -114,6 +116,7 @@ to a mounted file; the dbt profile reads plain variables only.
 | `TRINO_CA_BUNDLE` / `LAKEHOUSE_CA_BUNDLE` | | system trust | path of the internal CA bundle (Trino client, s3fs, pyiceberg REST) |
 | `PSEUDONYM_PEPPER` | **yes** | | >= 32 characters; key of the HMAC pseudonymisation. Losing it breaks key continuity, leaking it weakens pseudonymisation - store in OpenBao, back it up, never rotate without a re-index plan (docs/gdpr.md) |
 | `DBT_THREADS` | | `4` | dbt concurrency |
+| `LAKEHOUSE_ENV` | | (unset = production rules) | **new** - `dev`, `test` or `prod`. Only `dev` permits `dbt --full-refresh` of incremental models (docs/releases.md); set it per environment |
 | `SCHEDULES_ENABLED` | | `false` | start schedules automatically |
 | `SCHEDULE_TIMEZONE` | | `Europe/Copenhagen` | |
 | `INGEST_START_DATE` | | `2026-01-01` | first daily partition |

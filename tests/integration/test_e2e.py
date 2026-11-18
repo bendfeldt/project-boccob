@@ -1,8 +1,9 @@
 """End-to-end test on the podman harness (see harness.sh / scripts/integration-test.sh).
 
 The tests run in file order and build on each other:
-initial load -> changed load -> dimension rebuild -> idempotent re-run -> access control ->
-right to erasure -> another load -> retention and maintenance.
+initial load with the previous release's model shape -> release upgrade (schema migrations) with a
+changed load -> dimension rebuild -> idempotent re-run -> access control -> right to erasure ->
+another load -> retention and maintenance.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -75,16 +77,48 @@ def run_job(name: str, partition_key: str | None = None, run_config: dict | None
     return result
 
 
-def dbt(*args: str) -> str:
+def dbt(*args: str, env: dict | None = None, ok: bool = True) -> str:
     proc = subprocess.run(
         ["uv", "run", "--no-sync", "dbt", *args],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, **(env or {})},
     )
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
+    assert (proc.returncode == 0) == ok, proc.stdout[-4000:] + proc.stderr[-2000:]
     return proc.stdout
+
+
+def previous_release_project(target: Path) -> Path:
+    """The dbt project as release 0.1 shipped it: clean.citizens still carried the CPR number,
+    incremental models used on_schema_change='fail', no _anonymised_at marker. Built from the
+    current project so that everything else (keystore macros, other models) is identical."""
+    project = target / "transform-previous"
+    shutil.copytree(
+        ROOT / "transform", project, ignore=shutil.ignore_patterns("target", "logs", "dbt_packages", "migrations")
+    )
+    for sql in (project / "models").rglob("*.sql"):
+        text = sql.read_text(encoding="utf-8")
+        text = text.replace("on_schema_change='append_new_columns'", "on_schema_change='fail'")
+        text = "".join(line for line in text.splitlines(keepends=True) if "_anonymised_at" not in line)
+        if sql.name == "citizens.sql":
+            text = text.replace(
+                "    {{ subject_key('cpr') }} as citizen_id,\n",
+                "    {{ subject_key('cpr') }} as citizen_id,\n    {{ json_text('$.cpr') }} as cpr_number,\n",
+            ).replace("  citizen_id,\n  first_name,", "  citizen_id,\n  cpr_number,\n  first_name,")
+            assert text.count("cpr_number") == 2
+        sql.write_text(text, encoding="utf-8")
+    return project
+
+
+def clean_columns(trino: TrinoClient, table: str) -> set[str]:
+    rows = trino.execute(
+        "select column_name from clean.information_schema.columns where table_schema = 'borgerportal' "
+        "and table_name = ?",
+        [table],
+    )
+    return {r[0] for r in rows}
 
 
 def keystore(trino: TrinoClient, dimension: str) -> dict[int, dict]:
@@ -153,10 +187,13 @@ def assert_dense_keys(ks: dict[int, dict]) -> None:
 # --- 1. initial load ---------------------------------------------------------------------------
 
 
-def test_01_initial_load(trino, fs, s3):
-    result = run_job("daily_refresh", partition_key="2026-11-01")
-    checks = [e for e in result.all_events if e.event_type_value == "ASSET_CHECK_EVALUATION"]
-    assert len(checks) >= 40 and all(c.event_specific_data.passed for c in checks)
+def test_01_initial_load_with_the_previous_release(trino, fs, s3, tmp_path_factory):
+    """The lake is built by the previous release (old model shape, no migration table)."""
+    run_job("ingest_borgerportal", partition_key="2026-11-01")
+    previous = previous_release_project(tmp_path_factory.mktemp("release-0.1"))
+    out = dbt("build", "--project-dir", str(previous))
+    assert "ERROR=0" in out
+    assert "cpr_number" in clean_columns(trino, "citizens"), "sanity: the old shape carries the CPR"
 
     # LAND: contract layout, manifest checksums, native bytes untouched
     loads = read_manifests(fs, s3.raw_bucket, "borgerportal")
@@ -204,15 +241,12 @@ def test_01_initial_load(trino, fs, s3):
     assert str(amount) == batch.payments[0]["amount"].replace(".", "").replace(",", ".")
     assert pay_date.strftime("%d-%m-%Y") == batch.payments[0]["payment_date"]
 
-    # data minimisation: the CPR number exists only in the raw layer - no column, no stored value beyond it
-    cpr_columns = trino.execute(
-        "select table_catalog from clean.information_schema.columns where column_name like '%cpr%' "
-        "union all select table_catalog from consolidated.information_schema.columns where column_name like '%cpr%' "
-        "union all select table_catalog from curated.information_schema.columns where column_name like '%cpr%'"
-    )
-    assert cpr_columns == []
-    assert scan_storage(fs, ["lakehouse-clean", "lakehouse-consolidated", "lakehouse-curated"], [sample]) == []
+    # release 0.1 kept the CPR number in clean (fixed by migration V0001 in test_02); never beyond clean
+    assert trino.scalar("select count(cpr_number) from clean.borgerportal.citizens") > 0
+    assert scan_storage(fs, ["lakehouse-consolidated", "lakehouse-curated"], [sample]) == []
+    assert scan_storage(fs, ["lakehouse-clean"], [sample]) != [], "sanity: the old shape stored the CPR in clean"
     assert scan_storage(fs, ["lakehouse-raw"], [sample]) != [], "sanity: the scanner must find the CPR in raw"
+    assert not trino.table_exists("curated", "audit", "schema_migrations"), "release 0.1 had no migrations"
 
     # KEYSTORE
     ks = keystore(trino, "dim_citizen")
@@ -228,14 +262,64 @@ def test_01_initial_load(trino, fs, s3):
     assert_dense_keys(keystore(trino, "dim_case_type"))
 
     dbt("run-operation", "keystore_snapshot_baseline", "--args", "{dimensions: [dim_citizen, dim_case_type]}")
-    state.update(ks1=ks, facts1=facts, inferred1=inferred, dim1=citizen_dim(trino))
+    history = {tuple(r) for r in trino.execute("select citizen_id, source_updated_at from clean.borgerportal.citizens")}
+    state.update(ks1=ks, facts1=facts, inferred1=inferred, dim1=citizen_dim(trino), clean_citizens1=history)
 
 
-# --- 2. changed load ---------------------------------------------------------------------------
+# --- 2. release upgrade + changed load --------------------------------------------------------
 
 
-def test_02_changed_load_reuses_keys_and_builds_scd2(trino):
-    run_job("daily_refresh", partition_key="2026-11-02")
+def test_02_upgrade_migrates_without_a_wipe(trino, fs, s3, tmp_path):
+    """N-5: the new release runs its migrations first (daily_refresh), then continues incrementally."""
+    # outside dev a full refresh of an incremental model is refused before anything runs
+    out = dbt("build", "--full-refresh", "--select", "citizens", env={"LAKEHOUSE_ENV": "prod"}, ok=False)
+    assert "refused outside dev" in out
+    assert trino.scalar("select count(*) from clean.borgerportal.citizens") == len(state["clean_citizens1"])
+
+    result = run_job("daily_refresh", partition_key="2026-11-02")
+    checks = [e for e in result.all_events if e.event_type_value == "ASSET_CHECK_EVALUATION"]
+    assert len(checks) >= 40 and all(c.event_specific_data.passed for c in checks)
+    steps = [e.step_key for e in result.all_events if e.event_type_value == "STEP_SUCCESS"]
+    assert steps.index("curated__audit__schema_migrations") < steps.index("lakehouse_dbt_assets")
+
+    applied = trino.execute("select version, name, applied_by from curated.audit.schema_migrations order by 1")
+    assert applied[0] == ["0001", "clean_citizens_drop_cpr_number", "svc-dagster"]
+    assert "cpr_number" not in clean_columns(trino, "citizens")
+    # history of release 0.1 survives the upgrade: every citizen version of load 1 is still there
+    history = {tuple(r) for r in trino.execute("select citizen_id, source_updated_at from clean.borgerportal.citizens")}
+    assert state["clean_citizens1"] < history
+    # the dropped column is physically gone: files rewritten, history expired; the replaced files'
+    # noncurrent versions go with the maintenance job / bucket lifecycle (simulated here)
+    from lakehouse.objectstore import purge_noncurrent
+
+    purge_noncurrent(S3Settings.for_purge().filesystem(), "lakehouse-clean")
+    sample = generator.simulate(SEED, 1, CITIZENS).citizens[0]["cpr"]
+    assert scan_storage(fs, ["lakehouse-clean", "lakehouse-consolidated", "lakehouse-curated"], [sample]) == []
+    cpr_columns = trino.execute(
+        "select table_catalog from clean.information_schema.columns where column_name like '%cpr%' "
+        "union all select table_catalog from consolidated.information_schema.columns where column_name like '%cpr%' "
+        "union all select table_catalog from curated.information_schema.columns where column_name like '%cpr%'"
+    )
+    assert cpr_columns == []
+
+    # running the migrations again changes nothing
+    run_job("migrate")
+    assert trino.execute("select version from curated.audit.schema_migrations order by 1") == [[v] for v, *_ in applied]
+    # a migration on a table that does not exist (a new lake) is recorded without effect
+    from governance.migrations.runner import record_table, run_migrations
+
+    tmp = tmp_path / "migrations"
+    shutil.copytree(ROOT / "transform" / "migrations", tmp)
+    (tmp / "V9001__noop_on_missing_table.sql").write_text(
+        "alter table if exists ${clean}.no_such_schema.no_such_table drop column if exists x;\n"
+        "-- @purge-history clean.no_such_schema.no_such_table\n",
+        encoding="utf-8",
+    )
+    assert run_migrations(directory=tmp).applied == ["V9001__noop_on_missing_table"]
+    trino.execute(f"delete from {record_table()} where version = '9001'")
+
+
+def test_03_changed_load_reuses_keys_and_builds_scd2(trino):
     ks1, ks2 = state["ks1"], keystore(trino, "dim_citizen")
     assert_dense_keys(ks2)
 
@@ -306,13 +390,18 @@ def test_02_changed_load_reuses_keys_and_builds_scd2(trino):
     assert_dense_keys(types)
     assert {v["bk"] for v in types.values()} >= {"FLY", "BYG"}
     assert all(v["vk"] == "" for v in types.values() if v["type"] == "regular")
-    state.update(ks2=ks2, facts2=facts2, dim2=citizen_dim(trino), types2=types)
+    # SCD2 history built by release 0.1 survives the upgrade: same versions, same keys
+    dim2 = citizen_dim(trino)
+    regular = {sk for sk, v in ks1.items() if v["type"] == "regular"}
+    survived = {version: sk for version, sk in state["dim1"].items() if sk in regular}
+    assert survived and all(dim2.get(version) == sk for version, sk in survived.items())
+    state.update(ks2=ks2, facts2=facts2, dim2=dim2, types2=types)
 
 
 # --- 3. rebuild --------------------------------------------------------------------------------
 
 
-def test_03_full_rebuild_keeps_every_key(trino):
+def test_04_full_rebuild_keeps_every_key(trino):
     trino.execute("drop table curated.borgerservice.dim_citizen")
     trino.execute("drop table curated.borgerservice.dim_case_type")
     out = dbt("build", "--full-refresh")  # clean, consolidated, curated rebuilt from the raw index
@@ -326,7 +415,7 @@ def test_03_full_rebuild_keeps_every_key(trino):
     assert strip(keystore(trino, "dim_case_type")) == strip(state["types2"])
 
 
-def test_04_rerun_without_new_data_is_idempotent(trino):
+def test_05_rerun_without_new_data_is_idempotent(trino):
     from ingestion.framework.indexing import index_source
 
     assert index_source(SOURCE).rows == {}, "no committed load is pending"
@@ -344,7 +433,7 @@ def _as(user: str, sql: str):
     return TrinoClient(user=user).execute(sql)
 
 
-def test_05_access_control_and_masking():
+def test_06_access_control_and_masking():
     import trino.exceptions
 
     denied = trino.exceptions.TrinoUserError
@@ -412,7 +501,7 @@ def test_05_access_control_and_masking():
 # --- 5. right to erasure -----------------------------------------------------------------------
 
 
-def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
+def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     key = trino.scalar(
         """select k.business_key from curated.keystore.dim_citizen k
            where k.business_key in (select citizen_id from clean.borgerportal.payments)
@@ -439,10 +528,20 @@ def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
     stale = noncurrent_hits(fs, BUCKETS, [cpr, key])
     assert stale, "sanity: noncurrent object versions must contain the subject before the erasure"
 
-    # dry run through the same queue: counts, then the request is gone again
+    # dry run (N-8): counts only - it writes nothing, not even a queue row or a new snapshot
+    def governance_snapshots():
+        tables = trino.execute(
+            "select table_name from raw.information_schema.tables where table_schema = 'governance' order by 1"
+        )
+        return {t: trino.scalar(f'select count(*) from raw.governance."{t}$snapshots"') for (t,) in tables}
+
+    before_preview = governance_snapshots()
     preview = erase_subject(identifier=cpr, requested_by="dpo@kommune.example", reason="preview", dry_run=True)
     assert preview.rows["clean.borgerportal.citizens [delete]"] > 1 and preview.raw_files
-    assert trino.scalar(f"select count(*) from {queue_table_sql()}") == 0
+    assert preview.rows["clean.borgerportal.citizens [delete]"] == trino.scalar(
+        "select count(*) from clean.borgerportal.citizens where citizen_id = ?", [key]
+    )
+    assert governance_snapshots() == before_preview
 
     request_id = submit_request(identifier=cpr, requested_by="dpo@kommune.example", reason="integration test")
     result = run_job("erasure")  # GovernanceResource verifies the object store itself (ERASURE_VERIFY_STORAGE)
@@ -507,7 +606,11 @@ def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
         with pytest.raises(trino_errors.TrinoUserError):
             _as(user, "delete from curated.audit.erasure_log")
         with pytest.raises(trino_errors.TrinoUserError):
-            _as(user, f"insert into {queue_table_sql()} values ('x', 'y', 'z', 'u', 'v', current_timestamp)")
+            _as(
+                user,
+                f"insert into {queue_table_sql()} (request_id, subject_key, identifier_type, requested_by, reason, "
+                "requested_at) values ('x', 'y', 'z', 'u', 'v', current_timestamp)",
+            )
     # a raw file that contained the subject is replaced by a tombstone, its other records stay indexed
     tombstones = [p for p in fs.find(s3.raw_bucket) if p.endswith(".erased.json")]
     assert tombstones and all(not fs.exists(p.removesuffix(".erased.json")) for p in tombstones)
@@ -520,7 +623,7 @@ def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
     state.update(erased_keys=subject_keys, max_key=max_key)
 
 
-def test_07_next_load_after_erasure(trino):
+def test_08_next_load_after_erasure(trino):
     run_job("daily_refresh", partition_key="2026-11-03")
     ks = keystore(trino, "dim_citizen")
     assert_dense_keys(ks)
@@ -534,7 +637,7 @@ def test_07_next_load_after_erasure(trino):
 # --- 6. retention and maintenance --------------------------------------------------------------
 
 
-def test_08_retention_and_maintenance_jobs(trino, fs, s3):
+def test_09_retention_and_maintenance_jobs(trino, fs, s3):
     from datetime import date
 
     from governance.retention.runner import run_retention
@@ -586,7 +689,7 @@ def test_08_retention_and_maintenance_jobs(trino, fs, s3):
 # --- 7. concurrent key allocation ---------------------------------------------------------------
 
 
-def test_09_concurrent_allocation_never_duplicates_keys(trino, tmp_path):
+def test_10_concurrent_allocation_never_duplicates_keys(trino, tmp_path):
     """Three dbt processes allocate keys in the same keystore at the same moment (twice).
 
     Iceberg commits all of the colliding inserts; the macro must detect that, withdraw and retry.

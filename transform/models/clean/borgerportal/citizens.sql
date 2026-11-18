@@ -3,7 +3,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['citizen_id', 'source_updated_at'],
-    on_schema_change='fail'
+    on_schema_change='append_new_columns'
   )
 }}
 -- One row per delivered state of a citizen (change history, source aligned).

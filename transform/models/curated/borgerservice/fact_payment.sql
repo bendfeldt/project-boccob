@@ -3,7 +3,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key='payment_id',
-    on_schema_change='fail',
+    on_schema_change='append_new_columns',
     pre_hook=[
       "{{ keystore_register_inferred('dim_citizen', ref('payments'), 'citizen_id') }}",
       "{{ keystore_register_inferred('dim_case_type', ref('payments'), 'case_type_code') }}"

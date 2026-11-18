@@ -59,6 +59,7 @@ export TRINO_USER=svc-dagster
 export TRINO_HTTP_SCHEME=http
 export PSEUDONYM_PEPPER=${pepper}
 export OPA_URL=http://localhost:${OPA_PORT}
+export LAKEHOUSE_ENV=dev
 ENV
   fi
   # shellcheck disable=SC1091

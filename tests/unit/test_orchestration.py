@@ -71,3 +71,30 @@ def test_erasure_job_takes_no_identifier(defs):
 def test_daily_refresh_is_partitioned(defs):
     assert defs.resolve_job_def("daily_refresh").partitions_def is not None
     assert defs.resolve_job_def("transform").partitions_def is None
+
+
+def test_migrations_run_before_every_dbt_model(defs):
+    """N-5: the schema migrations are part of daily_refresh / transform and precede every model."""
+    import dagster as dg
+
+    from orchestration.assets.transform import MIGRATIONS_KEY
+
+    graph = defs.resolve_asset_graph()
+    models = [k for k in graph.get_all_asset_keys() if k.path[0] in ("clean", "consolidated", "curated")]
+    models = [k for k in models if k != MIGRATIONS_KEY]
+    assert models
+
+    def ancestors(k):
+        seen, todo = set(), [k]
+        while todo:
+            for parent in graph.get(todo.pop()).parent_keys:
+                if parent not in seen:
+                    seen.add(parent)
+                    todo.append(parent)
+        return seen
+
+    for k in models:
+        assert MIGRATIONS_KEY in ancestors(k), k
+    assert MIGRATIONS_KEY in graph.get(dg.AssetKey(["clean", "borgerportal", "citizens"])).parent_keys
+    for job in ("migrate", "transform", "daily_refresh"):
+        assert MIGRATIONS_KEY in defs.resolve_job_def(job).asset_layer.selected_asset_keys, job

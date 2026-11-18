@@ -3,7 +3,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key='payment_id',
-    on_schema_change='fail'
+    on_schema_change='append_new_columns'
   )
 }}
 -- Payment transactions, typed (Danish number/date formats) and denormalised with case attributes.

@@ -1,0 +1,129 @@
+"""Versioned schema migrations (audit N-5): parsing, ordering, recorded history, drift."""
+
+from __future__ import annotations
+
+import pytest
+
+from governance.migrations import runner as mr
+
+
+def write(tmp_path, name, text):
+    (tmp_path / name).write_text(text, encoding="utf-8")
+
+
+def test_repository_migrations_parse_and_are_idempotent():
+    migrations = mr.discover()
+    assert [m.label for m in migrations][:1] == ["V0001__clean_citizens_drop_cpr_number"]
+    first = migrations[0]
+    assert first.statements == ('alter table if exists "clean".borgerportal.citizens drop column if exists cpr_number',)
+    assert first.purge_history == (("clean", "borgerportal", "citizens"),)
+    for m in migrations:  # every statement must tolerate a new lake (no table yet) and a re-run
+        for statement in m.statements:
+            assert " if exists " in statement.lower() or " if not exists " in statement.lower(), statement
+
+
+def test_placeholders_follow_the_catalog_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLEAN_CATALOG", "clean_test")
+    write(tmp_path, "V0001__a.sql", "alter table if exists ${clean}.s.t drop column if exists c;\nselect 1 from x;\n")
+    (m,) = mr.discover(tmp_path)
+    assert m.statements == ('alter table if exists "clean_test".s.t drop column if exists c', "select 1 from x")
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "message"),
+    [
+        ("V1__a.sql", "select 1;", "named V<nnnn>"),
+        ("V0001__a.sql", "select 1 from ${nope}.s.t;", "unknown placeholder"),
+        ("V0001__a.sql", "delete from t where k = '" + "ab" * 32 + "';", "key-like"),
+        ("V0001__a.sql", "delete from t where cpr = '010101-1234';", "key-like or CPR"),
+        ("V0001__a.sql", "-- @purge-history nolayer.s.t\n", "layer"),
+        ("V0001__a.sql", "-- only a comment\n", "no statement"),
+    ],
+)
+def test_invalid_migrations_are_rejected(tmp_path, name, text, message):
+    write(tmp_path, name, text)
+    with pytest.raises(mr.MigrationError, match=message):
+        mr.discover(tmp_path)
+
+
+def test_duplicate_versions_are_rejected(tmp_path):
+    write(tmp_path, "V0001__a.sql", "select 1;")
+    write(tmp_path, "V0001__b.sql", "select 2;")
+    with pytest.raises(mr.MigrationError, match="duplicate"):
+        mr.discover(tmp_path)
+
+
+def test_recorded_history_is_checked(tmp_path):
+    write(tmp_path, "V0001__a.sql", "select 1;")
+    write(tmp_path, "V0002__b.sql", "select 2;")
+    first, second = mr.discover(tmp_path)
+    assert mr.check([first, second], {}) == [first, second]
+    assert mr.check([first, second], {"0001": ("a", first.checksum)}) == [second]
+    with pytest.raises(mr.MigrationError, match="changed after it was applied"):
+        mr.check([first, second], {"0001": ("a", "0" * 64)})
+    with pytest.raises(mr.MigrationError, match="newer release"):
+        mr.check([first], {"0001": ("a", first.checksum), "0002": ("b", second.checksum)})
+
+
+class FakeTrino:
+    def __init__(self, applied=(), columns=(), insert_rows=1):
+        self.applied = list(applied)
+        self.columns = list(columns)
+        self.insert_rows = insert_rows
+        self.statements: list[str] = []
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        if sql.startswith("select version"):
+            return [list(a) for a in self.applied]
+        if sql.startswith("insert into"):
+            self.applied.append(tuple(params[:3]))
+            return [[self.insert_rows]]
+        if "information_schema.columns" in sql:
+            return [[c] for c in self.columns]
+        return [[True]]
+
+    def table_exists(self, *parts):
+        return False
+
+
+def test_run_applies_pending_in_order_once(tmp_path):
+    write(tmp_path, "V0002__b.sql", "alter table if exists ${clean}.s.t add column if not exists y varchar;")
+    write(
+        tmp_path,
+        "V0001__a.sql",
+        "alter table if exists ${clean}.s.t drop column if exists x;\n-- @purge-history clean.s.t",
+    )
+    trino = FakeTrino()
+    report = mr.run_migrations(directory=tmp_path, trino=trino, check_drift=False)
+    assert report.applied == ["V0001__a", "V0002__b"] and report.purged == [], "missing table: nothing to purge"
+    alters = [s for s in trino.statements if s.startswith("alter")]
+    assert "drop column" in alters[0] and "add column" in alters[1]
+    again = mr.run_migrations(directory=tmp_path, trino=trino, check_drift=False)
+    assert again.applied == [] and again.already_applied == ["V0001__a", "V0002__b"]
+    dry = mr.run_migrations(directory=tmp_path, trino=FakeTrino(), dry_run=True)
+    assert dry.pending == ["V0001__a", "V0002__b"] and dry.applied == []
+
+
+def test_record_row_is_asserted(tmp_path):
+    write(tmp_path, "V0001__a.sql", "select 1;")
+    with pytest.raises(mr.MigrationError, match="record row"):
+        mr.run_migrations(directory=tmp_path, trino=FakeTrino(insert_rows=0), check_drift=False)
+
+
+def test_drift_check_flags_columns_the_model_dropped():
+    from governance.classification import manifest as cm
+    from tests.unit.test_governance import GOOD, manifest, model
+
+    tables = cm.tables_from_manifest(GOOD)
+    trino = FakeTrino(columns=["citizen_id", "cpr_number", "is_deleted"])
+    incremental = [t for t in tables if t.name == "citizens"]
+    assert mr.schema_drift(trino, incremental) == [], "GOOD declares cpr_number, but it is a table model"
+    node = model("citizens", "clean", "borgerportal", {"citizen_id": {"config": {"meta": {"pii": "indirect"}}}})
+    node["config"]["materialized"] = "incremental"
+    (t,) = cm.tables_from_manifest(manifest(node))
+    problems = mr.schema_drift(trino, [t])
+    assert problems == [
+        "clean.borgerportal.citizens.cpr_number: in the lake but not in the model - ship a migration",
+        "clean.borgerportal.citizens.is_deleted: in the lake but not in the model - ship a migration",
+    ]

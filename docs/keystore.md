@@ -134,7 +134,9 @@ dbt (run with every `dbt build`, surfaced as Dagster asset checks):
 
 Integration (`tests/integration/test_e2e.py`, on Trino/Polaris/RustFS): keys and creation timestamps
 are identical after a changed load, after dropping both dimension tables and after
-`dbt build --full-refresh` of everything; facts resolve to the same keys after the full refresh;
+`dbt build --full-refresh` of everything (dev only - outside dev a full refresh of incremental models
+is refused, see releases.md); facts resolve to the same keys after the full refresh; keys, SCD2
+versions and the clean history survive a release upgrade with schema migrations;
 only keys referenced by the newest fact load get a new last-used timestamp; inferred members keep
 their key when adopted; keys are sequential without gaps; erased keys are never reassigned;
 concurrent allocation by three processes leaves no duplicates.

@@ -3,7 +3,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['person_id', 'valid_from'],
-    on_schema_change='fail'
+    on_schema_change='append_new_columns'
   )
 }}
 -- Business entity PERSON: one row per known state of a person, harmonised across source systems.

@@ -24,6 +24,7 @@ lakehouse-erase = "governance.erasure.cli:main"
 lakehouse-maintain = "governance.maintenance.cli:main"
 lakehouse-retention = "governance.retention.cli:main"
 lakehouse-pii = "governance.classification.cli:main"
+lakehouse-migrate = "governance.migrations.cli:main"
 
 [dependency-groups]
 dev = [

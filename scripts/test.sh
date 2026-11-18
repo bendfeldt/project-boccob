@@ -8,6 +8,10 @@ need opa
 
 log "dbt parse (manifest for orchestration + classification tests)"
 "$ROOT/scripts/dbt.sh" parse >/dev/null
+log "dbt full refresh guard selftest (no database needed)"
+TRINO_HOST="${TRINO_HOST:-parse-only}" TRINO_USER="${TRINO_USER:-parse-only}" \
+  "$ROOT/scripts/dbt.sh" run-operation full_refresh_guard_selftest | grep "selftest ok" >/dev/null \
+  || die "full refresh guard selftest failed"
 
 log "pytest"
 uv run pytest -q "$@"

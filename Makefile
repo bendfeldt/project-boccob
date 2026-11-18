@@ -6,7 +6,7 @@ SOURCE ?= borgerportal
 
 .PHONY: help setup tools tools-supply-chain lint test opa-test dbt-parse classification check-classification \
         bundle bundle-push image image-push harness-up harness-down integration \
-        ingest dbt-build erase-dry-run retention-dry-run maintain dagster-dev clean
+        ingest dbt-build migrate migrate-status erase-dry-run retention-dry-run maintain dagster-dev clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-22s %s\n", $$1, $$2}'
@@ -65,7 +65,13 @@ ingest: ## Land + index one delivery (SOURCE=borgerportal)
 dbt-build: ## dbt build of clean, consolidated, curated (models + tests)
 	scripts/dbt.sh build
 
-erase-dry-run: ## Report what an erasure would remove (ERASURE_IDENTIFIER=... in the environment)
+migrate: ## Apply pending schema migrations (transform/migrations), see docs/releases.md
+	scripts/run.sh lakehouse-migrate
+
+migrate-status: ## List applied and pending schema migrations (changes nothing)
+	scripts/run.sh lakehouse-migrate --dry-run
+
+erase-dry-run: ## Report what an erasure would remove, read-only (ERASURE_IDENTIFIER=... in the environment)
 	scripts/run.sh lakehouse-erase --dry-run --requested-by "$${USER:-operator}" --reason dry-run
 
 retention-dry-run: ## Report what the retention policy would delete

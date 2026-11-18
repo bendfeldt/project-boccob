@@ -6,6 +6,7 @@ import dagster as dg
 
 from lakehouse.settings import LAYERS
 from orchestration.assets.ingestion import SOURCES
+from orchestration.assets.transform import MIGRATIONS_KEY
 from orchestration.resources import GovernanceResource
 
 WRITER_POOL = "lakehouse_writer"
@@ -27,15 +28,21 @@ ingest_jobs = [
     for source in SOURCES
 ]
 
+migrate_job = dg.define_asset_job(
+    name="migrate",
+    description="Apply pending schema migrations (transform/migrations); first step of a release, docs/releases.md",
+    selection=dg.AssetSelection.assets(MIGRATIONS_KEY),
+)
+
 transform_job = dg.define_asset_job(
     name="transform",
-    description="dbt build of clean, consolidated and curated (incl. keystore and tests)",
-    selection=LAYER_GROUPS,
+    description="Schema migrations, then dbt build of clean, consolidated and curated (incl. keystore and tests)",
+    selection=LAYER_GROUPS | dg.AssetSelection.assets(MIGRATIONS_KEY),
 )
 
 daily_refresh_job = dg.define_asset_job(
     name="daily_refresh",
-    description="End to end: land + index every source for the partition day, then dbt build",
+    description="End to end: land + index every source for the partition day, schema migrations, then dbt build",
     selection=dg.AssetSelection.all(),
 )
 
@@ -56,11 +63,26 @@ def iceberg_maintenance_op(context: dg.OpExecutionContext, config: MaintenanceCo
     return len(report.done)
 
 
+@dg.op(
+    pool=WRITER_POOL,
+    out=dg.Out(dg.Nothing),
+    description="Apply pending schema migrations first: governance SQL is derived from this release's models",
+)
+def migrate_op(context: dg.OpExecutionContext, governance: GovernanceResource):
+    # no drift check here: an unrelated drift must not block erasure or retention (daily_refresh checks it)
+    report = governance.migrate(check_drift=False)
+    context.log.info("migrations applied: %s", report.applied)
+
+
 class RetentionConfig(dg.Config):
     dry_run: bool = False
 
 
-@dg.op(pool=WRITER_POOL, description="Apply the retention policy to raw files, raw index and governed tables")
+@dg.op(
+    pool=WRITER_POOL,
+    ins={"after_migrations": dg.In(dg.Nothing)},
+    description="Apply the retention policy to raw files, raw index and governed tables",
+)
 def retention_op(context: dg.OpExecutionContext, config: RetentionConfig, governance: GovernanceResource):
     report = governance.apply_retention(dry_run=config.dry_run)
     context.add_output_metadata(
@@ -69,7 +91,11 @@ def retention_op(context: dg.OpExecutionContext, config: RetentionConfig, govern
     return report["landing_objects"]
 
 
-@dg.op(pool=WRITER_POOL, description="Execute queued right-to-erasure requests (no identifiers in run config or logs)")
+@dg.op(
+    pool=WRITER_POOL,
+    ins={"after_migrations": dg.In(dg.Nothing)},
+    description="Execute queued right-to-erasure requests (no identifiers in run config or logs)",
+)
 def erasure_op(context: dg.OpExecutionContext, governance: GovernanceResource):
     from governance.erasure.executor import ErasureBatchError
 
@@ -106,7 +132,7 @@ def iceberg_maintenance():
     description="Time based retention (governance/retention.yml + dbt meta.gdpr)", tags={"lakehouse/kind": "retention"}
 )
 def retention():
-    retention_op()
+    retention_op(after_migrations=migrate_op())
 
 
 @dg.job(
@@ -114,7 +140,7 @@ def retention():
     tags={"lakehouse/kind": "erasure"},
 )
 def erasure():
-    erasure_op()
+    erasure_op(after_migrations=migrate_op())
 
 
 # --- schedules -------------------------------------------------------------------------------
@@ -155,5 +181,5 @@ maintenance_schedule = dg.ScheduleDefinition(
     default_status=_status,
 )
 
-JOBS = [*ingest_jobs, transform_job, daily_refresh_job, iceberg_maintenance, retention, erasure]
+JOBS = [*ingest_jobs, migrate_job, transform_job, daily_refresh_job, iceberg_maintenance, retention, erasure]
 SCHEDULES = [daily_refresh_schedule, erasure_schedule, retention_schedule, maintenance_schedule]

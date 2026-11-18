@@ -10,6 +10,12 @@ test-paths: ["tests"]
 target-path: target
 clean-targets: ["target", "dbt_packages", "logs"]
 
+# Outside dev (LAKEHOUSE_ENV != dev) a full refresh of an incremental model is refused; schema
+# changes of incremental models: additive ones by on_schema_change='append_new_columns', every
+# other change through a versioned migration (migrations/, docs/releases.md).
+on-run-start:
+  - "{{ guard_full_refresh() }}"
+
 vars:
   # catalogs (one per layer) come from the environment: RAW_CATALOG, CLEAN_CATALOG,
   # CONSOLIDATED_CATALOG, CURATED_CATALOG (defaults: raw, clean, consolidated, curated)

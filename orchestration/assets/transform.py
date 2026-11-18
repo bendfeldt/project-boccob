@@ -9,9 +9,32 @@ from typing import Any
 import dagster as dg
 from dagster_dbt import DagsterDbtTranslator, DagsterDbtTranslatorSettings, DbtCliResource, dbt_assets
 
-from orchestration.resources import dbt_project
+from orchestration.resources import GovernanceResource, dbt_project
 
 WRITER_POOL = "lakehouse_writer"
+MIGRATIONS_KEY = dg.AssetKey(["curated", "audit", "schema_migrations"])
+
+
+@dg.asset(
+    key=MIGRATIONS_KEY,
+    group_name="governance",
+    pool=WRITER_POOL,
+    kinds={"trino", "iceberg"},
+    description=(
+        "Versioned schema migrations (transform/migrations): bring existing tables to the shape the "
+        "release's models expect before any dbt model runs; record them in curated.audit.schema_migrations"
+    ),
+)
+def schema_migrations(context: dg.AssetExecutionContext, governance: GovernanceResource) -> dg.MaterializeResult:
+    report = governance.migrate()
+    context.log.info("migrations applied: %s; already applied: %d", report.applied, len(report.already_applied))
+    return dg.MaterializeResult(
+        metadata={
+            "applied": report.applied,
+            "already_applied": len(report.already_applied),
+            "history_purged": report.purged,
+        }
+    )
 
 
 def _meta(props: Mapping[str, Any]) -> dict[str, Any]:
@@ -31,6 +54,17 @@ class LakehouseDbtTranslator(DagsterDbtTranslator):
     def get_group_name(self, dbt_resource_props: Mapping[str, Any]) -> str | None:
         layer = _meta(dbt_resource_props).get("layer", "dbt")
         return f"{layer}_{dbt_resource_props['schema']}"
+
+    def get_asset_spec(self, manifest: Mapping[str, Any], unique_id: str, project: Any) -> dg.AssetSpec:
+        """Root models (no upstream model) wait for the schema migrations: a release's migrations
+        always run before its first dbt model, in every job that selects both."""
+        spec = super().get_asset_spec(manifest, unique_id, project)
+        node = manifest.get("nodes", {}).get(unique_id) or {}
+        if node.get("resource_type") == "model":
+            upstream = (node.get("depends_on") or {}).get("nodes") or []
+            if not any(u.startswith("model.") for u in upstream):
+                spec = spec.merge_attributes(deps=[MIGRATIONS_KEY])
+        return spec
 
     def get_tags(self, dbt_resource_props: Mapping[str, Any]) -> Mapping[str, str]:
         tags = dict(super().get_tags(dbt_resource_props))
