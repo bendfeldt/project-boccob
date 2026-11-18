@@ -412,9 +412,9 @@ def test_05_access_control_and_masking():
 
 def test_06_erasure_removes_the_subject_everywhere(trino, fs, s3):
     key = trino.scalar(
-        """select c.citizen_id from clean.borgerportal.citizens c
-           join clean.borgerportal.payments p on p.citizen_id = c.citizen_id
-           group by c.citizen_id having count(distinct c.source_updated_at) > 1 limit 1"""
+        """select k.business_key from curated.keystore.dim_citizen k
+           where k.business_key in (select citizen_id from clean.borgerportal.payments)
+           group by k.business_key having count(*) > 1 limit 1"""
     )
     assert key, "need a citizen with history and payments"
     cpr = cpr_by_key()[key]
