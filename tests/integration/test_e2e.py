@@ -686,10 +686,67 @@ def test_09_retention_and_maintenance_jobs(trino, fs, s3):
     assert "ERROR=0" in dbt("test")
 
 
+def test_10_deregistration_erasure_keeps_bookkeeping_anonymised(trino, fs):
+    """N-6 (controller decision): a deregistered person loses every identifier at once, but payment
+    and case rows stay - unlinkable - until their own 5-year retention expires."""
+    from governance.erasure.queue import enqueue
+
+    key = trino.scalar(
+        """select p.citizen_id from clean.borgerportal.payments p
+           join clean.borgerportal.cases c on c.citizen_id = p.citizen_id
+           left join (select citizen_id, max_by(is_deleted, source_updated_at) d
+                      from clean.borgerportal.citizens group by 1) z on z.citizen_id = p.citizen_id
+           order by coalesce(z.d, false) desc, p.citizen_id limit 1"""
+    )
+    assert key
+    payments = {
+        r[0] for r in trino.execute("select payment_id from clean.borgerportal.payments where citizen_id = ?", [key])
+    }
+    cases = {r[0] for r in trino.execute("select case_id from clean.borgerportal.cases where citizen_id = ?", [key])}
+    assert payments and cases
+    enqueue(key, identifier_type="subject_key", requested_by="retention-policy", reason="test", scope="deregistration")
+    run_job("erasure")
+
+    for table, column in (
+        ("clean.borgerportal.citizens", "citizen_id"),
+        ("clean.borgerportal.cases", "citizen_id"),
+        ("clean.borgerportal.payments", "citizen_id"),
+        ("consolidated.party.person", "person_id"),
+        ("curated.borgerservice.dim_citizen", "person_id"),
+        ("curated.keystore.dim_citizen", "business_key"),
+    ):
+        assert trino.scalar(f"select count(*) from {table} where {column} = ?", [key]) == 0, table
+    ids = ", ".join(f"'{p}'" for p in sorted(payments))
+    kept = trino.execute(
+        f"select count(*), count(citizen_id), count(case_id), count(_anonymised_at) "
+        f"from clean.borgerportal.payments where payment_id in ({ids})"
+    )
+    assert kept == [[len(payments), 0, 0, len(payments)]], "bookings stay, without any link to the person"
+    ids = ", ".join(f"'{c}'" for c in sorted(cases))
+    kept = trino.execute(
+        "select count(*), count(citizen_id), count(_anonymised_at) "
+        f"from clean.borgerportal.cases where case_id in ({ids})"
+    )
+    assert kept == [[len(cases), 0, len(cases)]]
+    assert scan_storage(fs, BUCKETS, [key]) == []
+    audit = trino.execute("select status, details from curated.audit.erasure_log where reason like 'test (request %'")
+    assert len(audit) == 1 and audit[0][0] == "completed" and '"scope": "deregistration"' in audit[0][1]
+    assert trino.scalar(f"select count(*) from {queue_table_sql()}") == 0
+
+    # the anonymised rows still age out with the table's own rule, and the model tests still pass
+    from datetime import date
+
+    from governance.retention.runner import run_retention
+
+    future = {t["table"]: t["rows"] for t in run_retention(dry_run=True, today=date(2040, 1, 1))["tables"]}
+    assert future["clean.borgerportal.payments"] == trino.scalar("select count(*) from clean.borgerportal.payments")
+    assert "ERROR=0" in dbt("build")
+
+
 # --- 7. concurrent key allocation ---------------------------------------------------------------
 
 
-def test_10_concurrent_allocation_never_duplicates_keys(trino, tmp_path):
+def test_11_concurrent_allocation_never_duplicates_keys(trino, tmp_path):
     """Three dbt processes allocate keys in the same keystore at the same moment (twice).
 
     Iceberg commits all of the colliding inserts; the macro must detect that, withdraw and retry.

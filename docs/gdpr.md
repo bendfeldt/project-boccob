@@ -104,11 +104,33 @@ Groups are the Keycloak groups of the architecture contract.
 | raw index rows | 90 days after indexing |
 | `clean.borgerportal.payments`, `curated.borgerservice.fact_payment` | 5 years after payment / booking date |
 | `clean.borgerportal.cases` | 5 years after closing; open cases stay |
-| master data (`citizens`, `person`, `dim_citizen`) | kept while the person is registered; one year after deregistration (latest state `is_deleted`, meta `gdpr.deregistration`) the retention job queues the person for erasure, which removes them from every layer |
+| master data (`citizens`, `person`, `dim_citizen`) | kept while the person is registered; one year after deregistration (latest state `is_deleted`, meta `gdpr.deregistration`) the retention job queues the person for a *deregistration* erasure (below) |
 | Iceberg snapshots (time travel) | raw 3 days, clean/consolidated 7 days, curated 14 days |
 
 The `retention` job deletes expired rows and files (`lakehouse-retention --dry-run` reports first)
-and queues deregistered persons for erasure. Deleted rows remain reachable through older snapshots
+and queues deregistered persons for erasure.
+
+**Deregistered persons (controller decision).** One year after deregistration the person's
+identifiers are removed at once, but records that have their own retention duty - the payments
+(bookkeeping) and cases, both 5 years - are not deleted early. The retention job queues such persons
+with `scope = 'deregistration'`; the erasure job then treats every `erasure: delete` table that has
+its own time rule (`retention_days` + `retention_column`) differently from an art. 17 request:
+
+| Table kind | Art. 17 request (`scope = 'full'`) | Deregistration (`scope = 'deregistration'`) |
+|---|---|---|
+| raw index rows, native raw files | deleted | deleted |
+| master data without time rule (`clean.citizens`, `consolidated.person`) | deleted | deleted |
+| `erasure: delete` with own retention (`clean.payments`, `clean.cases`) | deleted | rows already past their retention are deleted; the others stay with the person key (`citizen_id`) and `anonymise_columns` (payments: `case_id`) set to NULL and `_anonymised_at` set |
+| facts (`erasure: anonymise`) | kept, pointing at the erased member | same |
+| dimensions + keystore | erased member | same |
+
+The kept rows can no longer be linked to the person inside the lakehouse: the pseudonym is gone from
+every table, the keystore no longer knows the business key, raw files and index rows are deleted.
+They age out with the table's own rule (payments 5 years after the payment date, cases 5 years
+after closing) through the normal `retention` job. Residual risks, accepted by the controller:
+the case number (`clean.cases.case_id`, the table's key) still identifies the case in the source
+system for as long as the source keeps it; a case that is still open never reaches its retention
+rule and stays anonymised until it is closed in the source. The erasure audit row records the scope. Deleted rows remain reachable through older snapshots
 until `iceberg_maintenance` expires them, and - on versioned buckets - the expired files remain as
 noncurrent object versions until the maintenance step `purge_noncurrent_versions` removes them once
 they have been noncurrent longer than the layer's orphan file retention. The effective retention is
@@ -195,3 +217,5 @@ Limits and operating rules:
   logs (which contain no subject keys from this tooling, see above), and consumers' extracts. They need their own retention so that erased data ages out.
 * Whether a fact may be kept in anonymised form (`erasure: anonymise`) or must be deleted
   (`erasure: delete`) is a per-table decision of the controller, expressed in the model's meta.
+  A `delete` table with its own time rule must have an `_anonymised_at` column (`make lint`
+  enforces it): deregistration erasures keep its rows anonymised until the rule expires.

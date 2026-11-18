@@ -88,6 +88,7 @@ class ErasureReport:
     subject_digest: str
     dry_run: bool
     request_id: str | None = None
+    scope: str = "full"
     status: str = "planned"
     rows: dict[str, int] = field(default_factory=dict)
     raw_files: list[str] = field(default_factory=list)
@@ -248,13 +249,14 @@ def execute_request(
         subject_digest=audit_digest(key, pepper),
         dry_run=False,
         request_id=validate_request_id(request_id),
+        scope=scope,
     )
     trino = _session(trino)
     s3 = s3 or S3Settings.from_env()
     purge_s3 = purge_s3 or S3Settings.for_purge()
     fs, purge_fs = s3.filesystem(), purge_s3.filesystem()
     tables = cm.tables_from_manifest(cm.load_manifest(manifest_path()))
-    plan: ErasurePlan = build_plan(request_id, tables, list_sources())
+    plan: ErasurePlan = build_plan(request_id, tables, list_sources(), scope=scope)
     existing = {name for name in plan.tables if _table_exists(trino, name)}
     steps = [s for s in plan.steps if s.table in existing]
 
@@ -411,7 +413,9 @@ def process_pending_requests(
     rq.ensure_queue()
     trino = _session(trino)
     pending = trino.execute(
-        "select request_id, subject_key, identifier_type, requested_by, reason, coalesce(scope, 'full') "
+        # rows queued by an older release carry no scope: the retention policy only queues deregistrations
+        "select request_id, subject_key, identifier_type, requested_by, reason, "
+        "coalesce(scope, case when requested_by = 'retention-policy' then 'deregistration' else 'full' end) "
         f"from {rq.queue_table_sql()} order by requested_at"
     )
     reports: list[ErasureReport] = []

@@ -97,7 +97,9 @@ models:
     config:
       meta:
         owner: team-borgerservice
-        # closed cases are deleted 5 years after closing; open cases have no closed_date and stay
+        # closed cases are deleted 5 years after closing; open cases have no closed_date and stay.
+        # Erasure request: deleted. Deregistration: the person link is removed at once, the case
+        # stays (anonymised, _anonymised_at) until its own retention expires (docs/gdpr.md).
         gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825, retention_column: closed_date}
     columns:
       - name: case_id
@@ -105,9 +107,12 @@ models:
         config: {meta: {pii: indirect}}
         data_tests: [not_null, unique]
       - name: citizen_id
-        description: Pseudonymised person key of the case party
+        description: Pseudonymised person key of the case party (NULL once anonymised)
         config: {meta: {pii: indirect, pseudonymised: true}}
-        data_tests: [not_null, pseudonym_format]
+        data_tests:
+          - pseudonym_format
+          - not_null:
+              config: {where: "_anonymised_at is null"}
       - name: case_type_code
         description: Case type code
         config: {meta: {pii: none}}
@@ -131,6 +136,10 @@ models:
         config: {meta: {pii: indirect, mask: redact}}
       - name: source_updated_at
         description: Change timestamp in the source system
+        config: {meta: {pii: none}}
+      - &tc_anonymised_at
+        name: _anonymised_at
+        description: Time a deregistration erasure removed the person link (row kept for its own retention)
         config: {meta: {pii: none}}
       - *tc_raw_file
       - *tc_raw_row
@@ -167,8 +176,15 @@ models:
     config:
       meta:
         owner: team-oekonomi
-        # bookkeeping records: 5 years after the payment date
-        gdpr: {subject_column: citizen_id, erasure: delete, retention_days: 1825, retention_column: payment_date}
+        # bookkeeping records: 5 years after the payment date. Erasure request: deleted.
+        # Deregistration: person link and case number removed at once, the booking stays
+        # (anonymised, _anonymised_at) until its own retention expires (docs/gdpr.md).
+        gdpr:
+          subject_column: citizen_id
+          erasure: delete
+          retention_days: 1825
+          retention_column: payment_date
+          anonymise_columns: [case_id]
     columns:
       - name: payment_id
         description: Payment number
@@ -204,6 +220,7 @@ models:
       - name: status
         description: Payment status
         config: {meta: {pii: none}}
+      - *tc_anonymised_at
       - *tc_raw_file
       - *tc_raw_row
       - *tc_load_id

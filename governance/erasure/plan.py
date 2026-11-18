@@ -8,12 +8,22 @@ The plan is derived from metadata, never hand-maintained:
                keeps its integer key (never reused) but loses the business key
     anonymise  fact: rows stay (e.g. bookkeeping duty) but only point at the erased member;
                ``anonymise_columns`` are set to NULL
+
+Scope of a request (``raw.governance.erasure_requests.scope``):
+    full            art. 17 request of the data subject: the plan above
+    deregistration  queued by the retention policy one year after deregistration (controller's
+                    decision, docs/gdpr.md): personal identifiers go at once, but a ``delete`` table
+                    with its own time rule (``retention_days`` + ``retention_column``, e.g. 5-year
+                    bookkeeping) keeps the rows whose retention has not expired - anonymised: the
+                    subject column and ``anonymise_columns`` become NULL, ``_anonymised_at`` is set.
+                    Expired rows are deleted. The normal retention job deletes the rest later.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 from governance.classification.manifest import TableClass
 from governance.config import catalog_of
@@ -23,6 +33,8 @@ from lakehouse.trino_client import fqn, ident
 _KEY = re.compile(r"^[0-9a-f]{64}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 KEYSTORE_SCHEMA = "keystore"
+SCOPES = ("full", "deregistration")
+ANONYMISED_MARKER = "_anonymised_at"
 
 
 class ErasurePlanError(ValueError):
@@ -97,9 +109,47 @@ def subject_query(request_id: str) -> str:
     return f"select subject_key from {queue_table_sql()} where request_id = '{validate_request_id(request_id)}'"
 
 
-def build_plan(request_id: str, tables: list[TableClass], sources: list[SourceSpec]) -> ErasurePlan:
+def retained_until_expiry(t: TableClass) -> bool:
+    """A ``delete`` table with its own time rule: kept anonymised on a deregistration erasure."""
+    return t.gdpr.get("erasure") == "delete" and bool(t.gdpr.get("retention_days") and t.gdpr.get("retention_column"))
+
+
+def _retain_anonymised_step(t: TableClass, subject: str, today: date) -> Step:
+    names = {c.name for c in t.columns}
+    if ANONYMISED_MARKER not in names:
+        raise ErasurePlanError(f"{t.key}: kept anonymised on deregistration but has no {ANONYMISED_MARKER} column")
+    target = fqn(t.catalog, t.schema, t.table)
+    subject_col = ident(t.gdpr["subject_column"])
+    where = f"{subject_col} in ({subject})"
+    cutoff = today - timedelta(days=int(t.gdpr["retention_days"]))
+    expired = f"cast({ident(t.gdpr['retention_column'])} as date) < date '{cutoff.isoformat()}'"
+    nulls = [subject_col] + [ident(c) for c in t.gdpr.get("anonymise_columns", []) if c in names]
+    sets = ", ".join(f"{c} = null" for c in nulls)
+    return Step(
+        table=t.key,
+        action="retain_anonymised",
+        statements=(
+            f"delete from {target} where {where} and {expired}",  # retention already over: gone now
+            f"update {target} set {sets}, {ident(ANONYMISED_MARKER)} = current_timestamp where {where}",
+        ),
+        count_sql=f"select count(*) from {target} where {where}",
+        verify_sql=f"select count(*) from {target} where {where}",
+    )
+
+
+def build_plan(
+    request_id: str,
+    tables: list[TableClass],
+    sources: list[SourceSpec],
+    *,
+    scope: str = "full",
+    today: date | None = None,
+) -> ErasurePlan:
+    if scope not in SCOPES:
+        raise ErasurePlanError(f"scope must be one of {SCOPES}, got {scope!r}")
     plan = ErasurePlan(request_id=validate_request_id(request_id))
     subject = subject_query(request_id)
+    today = today or date.today()
 
     # 1. raw index: every entity that declares person identifiers
     for source in sources:
@@ -157,6 +207,9 @@ def build_plan(request_id: str, tables: list[TableClass], sources: list[SourceSp
     # 3. plain deletes, clean -> consolidated -> curated
     for t in sorted(models, key=lambda t: order.get(t.layer or "", 9)):
         if t.gdpr.get("erasure") != "delete":
+            continue
+        if scope == "deregistration" and retained_until_expiry(t):
+            plan.steps.append(_retain_anonymised_step(t, subject, today))
             continue
         target = fqn(t.catalog, t.schema, t.table)
         where = f"{ident(t.gdpr['subject_column'])} in ({subject})"

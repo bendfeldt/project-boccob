@@ -161,6 +161,10 @@ def validate(tables: list[TableClass]) -> list[str]:
             problems.append(f"{t.key}: gdpr.subject_column must name a documented column")
         if action == "anonymise" and not (t.gdpr.get("subject_dimension") and t.gdpr.get("subject_key_column")):
             problems.append(f"{t.key}: gdpr.erasure=anonymise needs subject_dimension and subject_key_column")
+        # kept anonymised until its own retention expires when a deregistered person is erased
+        timed = bool(t.gdpr.get("retention_days") and t.gdpr.get("retention_column"))
+        if action == "delete" and timed and "_anonymised_at" not in {c.name for c in t.columns}:
+            problems.append(f"{t.key}: delete table with its own retention needs an _anonymised_at column")
         dereg = t.gdpr.get("deregistration")
         if dereg is not None:
             names = {c.name for c in t.columns}

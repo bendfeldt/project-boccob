@@ -68,12 +68,18 @@ GOOD = manifest(
         "payments",
         "clean",
         "borgerportal",
-        {"citizen_id": col("indirect", pseudonymised=True), "payment_date": col("none")},
+        {
+            "citizen_id": col("indirect", pseudonymised=True),
+            "case_id": col("indirect"),
+            "payment_date": col("none"),
+            "_anonymised_at": col("none"),
+        },
         gdpr={
             "subject_column": "citizen_id",
             "erasure": "delete",
             "retention_days": 365,
             "retention_column": "payment_date",
+            "anonymise_columns": ["case_id"],
         },
     ),
     model(
@@ -372,3 +378,62 @@ def test_noncurrent_selection_respects_age():
     cutoff = datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
     ids = {v.version_id for v in noncurrent_versions(versions, older_than=cutoff)}
     assert ids == {"o1", "om"}, "versions inside the recovery window stay, with their marker"
+
+
+def test_deregistration_keeps_bookkeeping_rows_anonymised():
+    """N-6 (controller decision): a deregistration erasure removes the person link at once but keeps
+    rows of tables with their own retention until it expires; an art. 17 request deletes them."""
+    tables = cm.tables_from_manifest(GOOD)
+    full = {s.table: s for s in build_plan(REQ, tables, []).steps}
+    assert full["clean.borgerportal.payments"].action == "delete"
+    dereg = {s.table: s for s in build_plan(REQ, tables, [], scope="deregistration", today=date(2030, 6, 1)).steps}
+    payments = dereg["clean.borgerportal.payments"]
+    assert payments.action == "retain_anonymised"
+    expire, anonymise = payments.statements
+    assert expire == (
+        f'delete from "clean"."borgerportal"."payments" where "citizen_id" in {QUEUE} '
+        "and cast(\"payment_date\" as date) < date '2029-06-01'"
+    )
+    assert anonymise == (
+        'update "clean"."borgerportal"."payments" set "citizen_id" = null, "case_id" = null, '
+        f'"_anonymised_at" = current_timestamp where "citizen_id" in {QUEUE}'
+    )
+    assert payments.verify_sql == payments.count_sql and "citizen_id" in payments.verify_sql
+    # master data has no time rule: deleted in both scopes; facts and keystore as for a full erasure
+    assert dereg["clean.borgerportal.citizens"].action == "delete"
+    assert dereg["curated.borgerservice.fact_payment"].action == "anonymise"
+    assert dereg["curated.borgerservice.dim_citizen"].action == "keystore"
+    with pytest.raises(ErasurePlanError):
+        build_plan(REQ, tables, [], scope="partial")
+
+
+def test_retained_table_needs_the_anonymised_marker():
+    node = model(
+        "payments",
+        "clean",
+        "borgerportal",
+        {"citizen_id": col("indirect", pseudonymised=True), "payment_date": col("none")},
+        gdpr={
+            "subject_column": "citizen_id",
+            "erasure": "delete",
+            "retention_days": 1,
+            "retention_column": "payment_date",
+        },
+    )
+    tables = cm.tables_from_manifest(manifest(node))
+    assert any("_anonymised_at" in p for p in cm.validate(tables))
+    with pytest.raises(ErasurePlanError, match="_anonymised_at"):
+        build_plan(REQ, tables, [], scope="deregistration")
+
+
+def test_real_project_deregistration_plan():
+    """The shipped models: cases and payments are kept anonymised, everything else as before."""
+    from governance.config import manifest_path
+
+    path = manifest_path()
+    if not path.is_file():
+        pytest.skip("dbt manifest missing - run `make dbt-parse`")
+    tables = cm.tables_from_manifest(cm.load_manifest(path))
+    steps = {s.table: s.action for s in build_plan(REQ, tables, [], scope="deregistration").steps}
+    assert steps["clean.borgerportal.cases"] == steps["clean.borgerportal.payments"] == "retain_anonymised"
+    assert steps["clean.borgerportal.citizens"] == steps["consolidated.party.person"] == "delete"

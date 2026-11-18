@@ -54,6 +54,7 @@ select
   _raw_row,
   _load_id,
   _loaded_at,
+  {{ ts6('null') }} as _anonymised_at,  -- set by a deregistration erasure (docs/gdpr.md)
   {{ audit_columns() }}
 from deduplicated
 where _rn = 1

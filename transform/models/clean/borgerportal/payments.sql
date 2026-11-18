@@ -55,6 +55,7 @@ select
   p._raw_row,
   p._load_id,
   p._loaded_at,
+  {{ ts6('null') }} as _anonymised_at,  -- set by a deregistration erasure (docs/gdpr.md)
   {{ audit_columns() }}
 from deduplicated p
 left join {{ ref('cases') }} c on c.case_id = p.case_id

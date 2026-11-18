@@ -32,6 +32,9 @@
     },
     "clean.borgerportal.cases": {
       "columns": {
+        "_anonymised_at": {
+          "pii": "none"
+        },
         "_invocation_id": {
           "pii": "none"
         },
@@ -159,6 +162,9 @@
     },
     "clean.borgerportal.payments": {
       "columns": {
+        "_anonymised_at": {
+          "pii": "none"
+        },
         "_invocation_id": {
           "pii": "none"
         },
