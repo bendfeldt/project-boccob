@@ -98,3 +98,38 @@ def test_migrations_run_before_every_dbt_model(defs):
     assert MIGRATIONS_KEY in graph.get(dg.AssetKey(["clean", "borgerportal", "citizens"])).parent_keys
     for job in ("migrate", "transform", "daily_refresh"):
         assert MIGRATIONS_KEY in defs.resolve_job_def(job).asset_layer.selected_asset_keys, job
+
+
+def test_purge_tag_sets_only_env_from(monkeypatch):
+    """R3-1: the platform restricts user-defined k8s config to container_config.env_from
+    (only_allow_user_defined_k8s_config_fields); the solution's only k8s tag must fit that."""
+    import importlib
+
+    import orchestration.jobs as jobs
+
+    monkeypatch.setenv("PURGE_CREDENTIALS_SECRET", "lakehouse-purge-env")
+    reloaded = importlib.reload(jobs)
+    try:
+        import json
+
+        from dagster_k8s.container_context import K8sContainerContext
+        from dagster_k8s.job import UserDefinedDagsterK8sConfig
+
+        shape = {"container_config": {"env_from": [{"secret_ref": {"name": "lakehouse-purge-env"}}]}}
+        assert {"dagster-k8s/config": shape} == reloaded.PURGE_TAGS
+        allow = {"container_config": {"env_from": True}}  # the platform's allowlist
+        for job in (reloaded.erasure, reloaded.retention, reloaded.iceberg_maintenance):
+            tag = json.loads(job.tags["dagster-k8s/config"])
+            assert tag == shape
+            ctx = K8sContainerContext(run_k8s_config=UserDefinedDagsterK8sConfig.from_dict(tag))
+            ctx.validate_user_k8s_config_for_run(allow, None)  # raises on any other field
+        forged = {**shape, "pod_template_spec_metadata": {"labels": {"dagster/job": "erasure"}}}
+        with pytest.raises(Exception, match="violated the allowed list"):
+            K8sContainerContext(
+                run_k8s_config=UserDefinedDagsterK8sConfig.from_dict(forged)
+            ).validate_user_k8s_config_for_run(allow, None)
+        for job in [*reloaded.ingest_jobs, reloaded.migrate_job, reloaded.transform_job, reloaded.daily_refresh_job]:
+            assert "dagster-k8s/config" not in (job.tags or {}), job.name
+    finally:
+        monkeypatch.delenv("PURGE_CREDENTIALS_SECRET")
+        importlib.reload(jobs)
