@@ -19,6 +19,10 @@ docs/            data-layers, keystore, gdpr, adding-a-source, releases, platfor
 
 ## Quick start
 
+To run the whole platform (cluster, Trino, Dagster, ...) with this code on it, follow the
+[getting-started guide in the IaC repository](https://github.com/bendfeldt/project-boccob-iac/blob/main/docs/getting-started.md).
+The commands below only cover this repository on its own.
+
 Requirements: `uv`, `podman`, GNU make, python 3.13.
 
 ```bash
