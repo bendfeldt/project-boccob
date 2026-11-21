@@ -30,6 +30,7 @@ class ColumnClass:
     mask: str | None = None
     cpr: bool = False
     pseudonymised: bool = False
+    data_type: str | None = None  # only when declared in the model yml
 
     def as_policy(self) -> dict[str, Any]:
         doc: dict[str, Any] = {"pii": self.pii}
@@ -79,6 +80,7 @@ def _column(name: str, col: dict[str, Any]) -> ColumnClass:
         mask=str(mask) if mask is not None else None,
         cpr=bool(meta.get("cpr", False)),
         pseudonymised=bool(meta.get("pseudonymised", False)),
+        data_type=(str(col["data_type"]).strip().lower() or None) if col.get("data_type") else None,
     )
 
 

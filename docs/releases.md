@@ -49,7 +49,10 @@ would disappear while the keystore and the facts still refer to their keys.
 
    After the migrations the runner compares the live columns of every incremental model with the
    model (drift check): a column that exists in the lake but not in the model would otherwise be
-   kept, with its data, by `append_new_columns` - the run fails until a migration removes it.
+   kept, with its data, by `append_new_columns`, and a live type that differs from a `data_type`
+   declared in the model yml - the run fails until a migration fixes it. A changed type of an
+   undeclared column is refused when dbt runs the model (`trino__process_schema_changes` in
+   `macros/utils/guards.sql`: `append_new_columns` would otherwise ignore the new type).
 3. **No full refresh outside dev.** With `LAKEHOUSE_ENV` other than `dev` (unset counts as
    production) `dbt ... --full-refresh` of an incremental model is refused before anything runs
    (`on-run-start` hook) and again inside the materialization (`should_full_refresh` override, also

@@ -228,25 +228,41 @@ def apply(trino: TrinoClient, migration: Migration) -> list[str]:
 
 
 def schema_drift(trino: TrinoClient, tables) -> list[str]:
-    """Columns that exist in an incremental model's table but not in the model any more.
+    """Differences between an incremental model's table and the model that a migration must fix.
 
-    With ``append_new_columns`` dbt would silently keep such a column (and its data); a removal
-    must ship as a migration, so this is an error.
+    * a column in the lake that the model no longer has: ``append_new_columns`` would silently keep
+      it (and its data)
+    * a column whose live type differs from a ``data_type`` declared in the model yml
+
+    Type changes of undeclared columns are caught when dbt runs the model (guards.sql:
+    ``trino__process_schema_changes`` refuses ``new_target_types``), because only then is the
+    model's new type known.
     """
     problems = []
     for t in tables:
         if t.resource_type != "model" or t.materialized != "incremental":
             continue
         rows = trino.execute(
-            f"select column_name from {ident(t.catalog)}.information_schema.columns "
+            f"select column_name, data_type from {ident(t.catalog)}.information_schema.columns "
             "where table_schema = ? and table_name = ?",
             [t.schema, t.table],
         )
-        documented = {c.name for c in t.columns}
-        for (column,) in rows:
-            if column.lower() not in documented:
+        documented = {c.name: c for c in t.columns}
+        for row in rows:
+            column, live_type = row[0].lower(), (row[1] if len(row) > 1 else None)
+            if column not in documented:
                 problems.append(f"{t.key}.{column}: in the lake but not in the model - ship a migration")
+                continue
+            declared = documented[column].data_type
+            if declared and live_type and _norm_type(declared) != _norm_type(live_type):
+                problems.append(
+                    f"{t.key}.{column}: type {live_type} in the lake, {declared} in the model - ship a migration"
+                )
     return problems
+
+
+def _norm_type(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower()).replace(" (", "(").replace(", ", ",")
 
 
 def run_migrations(

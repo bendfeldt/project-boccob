@@ -82,3 +82,37 @@
   {%- endfor -%}
   {{ log("full refresh guard selftest ok (" ~ cases | length ~ " cases)", info=true) }}
 {% endmacro %}
+
+
+{#
+  Type change guard (audit R3-4). With on_schema_change='append_new_columns' dbt adds new columns
+  but silently ignores a changed data type (the merge then casts implicitly or fails late). Refuse
+  it: a retype of a released incremental model is a migration (docs/releases.md).
+  Found by dispatch (dbt_project.yml: dispatch search order boccob -> dbt).
+#}
+{% macro trino__process_schema_changes(on_schema_change, source_relation, target_relation) %}
+  {%- if on_schema_change == 'append_new_columns' -%}
+    {%- set changes = check_for_schema_changes(source_relation, target_relation) -%}
+    {%- if changes['new_target_types'] -%}
+      {%- set described = [] -%}
+      {%- for c in changes['new_target_types'] -%}
+        {%- do described.append(c['column_name'] ~ ' -> ' ~ c['new_type']) -%}
+      {%- endfor -%}
+      {{ exceptions.raise_compiler_error(
+          "Column type change in " ~ target_relation ~ ": " ~ (described | join(', '))
+          ~ ". append_new_columns would ignore it - ship a migration (docs/releases.md)."
+      ) }}
+    {%- endif -%}
+  {%- endif -%}
+  {{ return(dbt.default__process_schema_changes(on_schema_change, source_relation, target_relation)) }}
+{% endmacro %}
+
+
+{# `dbt run-operation schema_change_guard_selftest` - the incremental materialization must reach the guard #}
+{% macro schema_change_guard_selftest() %}
+  {%- set resolved = adapter.dispatch('process_schema_changes', 'dbt') -%}
+  {%- if resolved.get_name() != 'trino__process_schema_changes' or 'boccob' not in (resolved.macro.package_name | string) -%}
+    {{ exceptions.raise_compiler_error("process_schema_changes resolves to " ~ resolved.macro.package_name ~ "." ~ resolved.get_name()) }}
+  {%- endif -%}
+  {{ log("schema change guard selftest ok (" ~ resolved.macro.package_name ~ "." ~ resolved.get_name() ~ ")", info=true) }}
+{% endmacro %}

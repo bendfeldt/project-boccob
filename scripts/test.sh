@@ -12,6 +12,9 @@ log "dbt full refresh guard selftest (no database needed)"
 TRINO_HOST="${TRINO_HOST:-parse-only}" TRINO_USER="${TRINO_USER:-parse-only}" \
   "$ROOT/scripts/dbt.sh" run-operation full_refresh_guard_selftest | grep "selftest ok" >/dev/null \
   || die "full refresh guard selftest failed"
+TRINO_HOST="${TRINO_HOST:-parse-only}" TRINO_USER="${TRINO_USER:-parse-only}" \
+  "$ROOT/scripts/dbt.sh" run-operation schema_change_guard_selftest | grep "selftest ok" >/dev/null \
+  || die "schema change guard selftest failed (dispatch does not reach the project macro)"
 
 log "pytest"
 uv run pytest -q "$@"

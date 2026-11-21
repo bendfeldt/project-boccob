@@ -16,6 +16,11 @@ clean-targets: ["target", "dbt_packages", "logs"]
 on-run-start:
   - "{{ guard_full_refresh() }}"
 
+# project overrides of dbt's dispatched macros (type change guard in macros/utils/guards.sql)
+dispatch:
+  - macro_namespace: dbt
+    search_order: [boccob, dbt]
+
 vars:
   # catalogs (one per layer) come from the environment: RAW_CATALOG, CLEAN_CATALOG,
   # CONSOLIDATED_CATALOG, CURATED_CATALOG (defaults: raw, clean, consolidated, curated)

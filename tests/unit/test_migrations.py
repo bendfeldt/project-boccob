@@ -80,7 +80,7 @@ class FakeTrino:
             self.applied.append(tuple(params[:3]))
             return [[self.insert_rows]]
         if "information_schema.columns" in sql:
-            return [[c] for c in self.columns]
+            return [list(c) if isinstance(c, tuple) else [c, "varchar"] for c in self.columns]
         return [[True]]
 
     def scalar(self, sql, params=None):
@@ -158,3 +158,25 @@ def test_purge_history_rewrites_every_row_first(tmp_path, monkeypatch):
     report = mr.run_migrations(directory=tmp_path, trino=Existing(), check_drift=False)
     assert report.purged == ["clean.s.t"]
     assert calls == [("update", 'update "clean"."s"."t" set "citizen_id" = "citizen_id"'), ("purge", "clean.s.t")]
+
+
+def test_drift_check_flags_declared_type_changes():
+    from governance.classification import manifest as cm
+    from tests.unit.test_governance import manifest, model
+
+    node = model(
+        "payments",
+        "clean",
+        "borgerportal",
+        {
+            "amount": {"data_type": "decimal(18, 2)", "config": {"meta": {"pii": "indirect"}}},
+            "status": {"data_type": "VARCHAR", "config": {"meta": {"pii": "none"}}},
+            "note": {"config": {"meta": {"pii": "none"}}},
+        },
+    )
+    node["config"]["materialized"] = "incremental"
+    (t,) = cm.tables_from_manifest(manifest(node))
+    trino = FakeTrino(columns=[("amount", "double"), ("status", "varchar"), ("note", "bigint")])
+    assert mr.schema_drift(trino, [t]) == [
+        "clean.borgerportal.payments.amount: type double in the lake, decimal(18, 2) in the model - ship a migration"
+    ], "undeclared types are left to the dbt guard; declared ones are compared case/space-insensitively"
