@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Local integration harness: RustFS + Polaris + Trino (+ OPA) as throwaway podman containers.
 # All containers/networks are prefixed "sol-" and removed by `harness.sh down`.
-# Credentials are generated per harness instance and written to .harness/env (git-ignored).
+# Credentials are generated per harness instance into $HARNESS_STATE_DIR/env, outside the repo.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-STATE_DIR="${HARNESS_STATE_DIR:-$ROOT/.harness}"
+STATE_DIR="${HARNESS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/boccob/solution/harness}"  # outside the repo
 NET=sol-test
 
 # image pins (tag@INDEX digest: podman picks the linux/amd64 or linux/arm64 image of the

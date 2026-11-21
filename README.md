@@ -38,7 +38,7 @@ make help           # all targets
 and removes everything again (about 5 minutes, roughly 5 GB RAM). `KEEP_HARNESS=1` keeps it running;
 `make harness-up` / `make harness-down` control it by hand, and with the harness up the other
 targets (`make ingest`, `make dbt-build`, `make dagster-dev`, ...) work against it because
-`scripts/lib.sh` loads `.harness/env` (or a developer `.env`).
+`scripts/lib.sh` loads `~/.local/state/boccob/solution/env` (your own settings) or the harness env next to it. No secret file may live in the checkout: `.env`, `.harness/` or `.dlt/secrets.toml` in the repo make the scripts stop.
 
 ## The demo flow
 
@@ -81,7 +81,7 @@ of `scripts/build-image.sh` (`UV_DEFAULT_INDEX` for an internal mirror, `BUILD_C
 
 Everything is configured through environment variables; there are no credentials in this
 repository. The full list is in [docs/platform-contract.md](docs/platform-contract.md). The
-integration harness generates throwaway credentials into `.harness/env` (git-ignored).
+integration harness generates throwaway credentials into `~/.local/state/boccob/solution/harness/env`, outside the repo.
 
 ## Conventions
 

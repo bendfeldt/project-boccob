@@ -14,8 +14,8 @@ cleanup() { [[ "${KEEP_HARNESS:-0}" == "1" ]] || "$ROOT/tests/integration/harnes
 trap cleanup EXIT
 "$ROOT/tests/integration/harness.sh" up
 # shellcheck disable=SC1091
-source "$ROOT/.harness/env"
-mkdir -p "$ROOT/dist/dagster-home"
-export DAGSTER_HOME="$ROOT/dist/dagster-home"
+source "$HARNESS_STATE_DIR/env"
+export DAGSTER_HOME="$SOL_STATE_DIR/dagster-home"  # run storage may hold config: keep it out of the repo
+mkdir -p "$DAGSTER_HOME"
 touch "$DAGSTER_HOME/dagster.yaml"
 uv run pytest tests/integration -m integration -x -q -p no:cacheprovider "$@"

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Shared helpers for the solution scripts.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Local secrets and generated credentials live outside the checkout, never in the repo.
+SOL_STATE_DIR="${SOL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/boccob/solution}"
+export HARNESS_STATE_DIR="${HARNESS_STATE_DIR:-$SOL_STATE_DIR/harness}"
 export ROOT
 export PATH="$ROOT/.tools/bin:$PATH"
 export DBT_PROJECT_DIR="${DBT_PROJECT_DIR:-$ROOT/transform}"
@@ -52,10 +55,16 @@ sha256_file() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
-# Load local environment: .env (developer) or the integration harness env, if present.
+# Load local environment: the developer env file or the integration harness env, if present.
+# Both live under $SOL_STATE_DIR (outside the checkout); secrets inside the repo are refused.
 load_env() {
-  if [[ -f "$ROOT/.env" ]]; then set -a; source "$ROOT/.env"; set +a
-  elif [[ -f "$ROOT/.harness/env" ]]; then source "$ROOT/.harness/env"; fi
+  local f
+  for f in "$ROOT/.env" "$ROOT/.harness/env" "$ROOT/.dlt/secrets.toml"; do
+    [[ -e "$f" ]] && die "secrets must not live in the repo: move ${f#"$ROOT"/} to $SOL_STATE_DIR/ (see README)"
+  done
+  # shellcheck disable=SC1091
+  if [[ -f "$SOL_STATE_DIR/env" ]]; then set -a; source "$SOL_STATE_DIR/env"; set +a
+  elif [[ -f "$HARNESS_STATE_DIR/env" ]]; then source "$HARNESS_STATE_DIR/env"; fi
 }
 
 # Version of the artifacts: explicit VERSION, else git describe.

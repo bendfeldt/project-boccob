@@ -7,6 +7,9 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_env
+# dagster dev would otherwise put its instance (run storage, logs) in the checkout
+export DAGSTER_HOME="${DAGSTER_HOME:-$SOL_STATE_DIR/dagster-home}"
+mkdir -p "$DAGSTER_HOME"; touch "$DAGSTER_HOME/dagster.yaml"
 [[ $# -gt 0 ]] || die "usage: scripts/run.sh <command> [args...]"
 cd "$ROOT"
 exec uv run "$@"

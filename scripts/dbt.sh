@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run dbt against the configured Trino (environment from .env / harness / the pod).
+# Run dbt against the configured Trino (environment from $SOL_STATE_DIR/env, the harness, or the pod).
 #   usage: scripts/dbt.sh build | test | run --select ... | parse
 # `parse` needs no connection: placeholders are used when TRINO_HOST / TRINO_USER are unset.
 set -euo pipefail
