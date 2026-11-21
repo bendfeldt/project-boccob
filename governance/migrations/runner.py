@@ -21,6 +21,8 @@ File format::
   history afterwards (rewrite_all_rows + governance.iceberg.purge_history), e.g. so that a dropped
   personal-data column is physically gone and not only hidden; skipped when the table does not exist
 * no key-like (64-hex) or CPR-shaped literal may appear: SQL text is archived WORM
+* the recorded checksum covers the normalised SQL (comments and whitespace removed) and the
+  directives: comment edits are allowed after release, statement changes are not
 
 Applied migrations are recorded in ``curated.audit.schema_migrations`` (protected schema: only the
 service group writes). A recorded migration whose file has changed, or a recorded version that this
@@ -61,9 +63,10 @@ class Migration:
     version: str  # "0001"
     name: str
     path: Path
-    checksum: str
+    checksum: str  # of the normalised SQL: comments and whitespace do not count
     statements: tuple[str, ...]
     purge_history: tuple[tuple[str, str, str], ...] = ()  # (layer, schema, table)
+    legacy_checksum: str = ""  # raw file text, as recorded before release 0.2.1
 
     @property
     def label(self) -> str:
@@ -88,6 +91,28 @@ def _catalogs() -> dict[str, str]:
     return {layer: ident(catalog_of(layer)) for layer in LAYERS}
 
 
+def _strip_inline_comment(line: str) -> str:
+    """Drop a trailing ``-- comment`` that is not inside a single-quoted literal."""
+    quoted = False
+    for i, ch in enumerate(line):
+        if ch == "'":
+            quoted = not quoted
+        elif not quoted and line.startswith("--", i):
+            return line[:i].rstrip()
+    return line
+
+
+def normalised_checksum(body: list[str], purge: list[tuple[str, str, str]]) -> str:
+    """sha256 over what a migration *does*: the SQL without comments, whitespace runs collapsed
+    (placeholders unresolved, so the catalog names of an environment do not matter) plus the
+    directives. Editing a comment of an applied migration therefore does not block a release;
+    changing a statement still does."""
+    sql = re.sub(r"\s+", " ", " ".join(body)).strip()
+    sql = re.sub(r"\s*;\s*", ";", sql)
+    directives = "|".join(".".join(p) for p in purge)
+    return hashlib.sha256(f"{sql}\n@purge-history:{directives}".encode()).hexdigest()
+
+
 def parse(path: Path) -> Migration:
     m = _FILE.match(path.name)
     if not m:
@@ -109,7 +134,7 @@ def parse(path: Path) -> Migration:
         elif stripped.startswith("--"):
             continue
         else:
-            body.append(line)
+            body.append(_strip_inline_comment(line))
     catalogs = _catalogs()
 
     def placeholder(match: re.Match) -> str:
@@ -127,7 +152,8 @@ def parse(path: Path) -> Migration:
         version=m.group(1),
         name=m.group(2),
         path=path,
-        checksum=hashlib.sha256(text.encode()).hexdigest(),
+        checksum=normalised_checksum(body, purge),
+        legacy_checksum=hashlib.sha256(text.encode()).hexdigest(),
         statements=statements,
         purge_history=tuple(purge),
     )
@@ -176,7 +202,7 @@ def check(migrations: list[Migration], applied: dict[str, tuple[str, str]]) -> l
             "newer release. Deploy that release (or restore the lake) instead of rolling back."
         )
     for version, (name, checksum) in sorted(applied.items()):
-        if known[version].checksum != checksum:
+        if checksum not in (known[version].checksum, known[version].legacy_checksum):
             raise MigrationError(
                 f"V{version}__{name} was changed after it was applied; never edit an applied migration, add a new one"
             )

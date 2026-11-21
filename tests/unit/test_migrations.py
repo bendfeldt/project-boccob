@@ -180,3 +180,37 @@ def test_drift_check_flags_declared_type_changes():
     assert mr.schema_drift(trino, [t]) == [
         "clean.borgerportal.payments.amount: type double in the lake, decimal(18, 2) in the model - ship a migration"
     ], "undeclared types are left to the dbt guard; declared ones are compared case/space-insensitively"
+
+
+def test_checksum_ignores_comments_and_whitespace_but_not_statements(tmp_path):
+    a, b, c, d = (tmp_path / x for x in "abcd")
+    for directory in (a, b, c, d):
+        directory.mkdir()
+    write(
+        a,
+        "V0001__x.sql",
+        "-- why\nalter table if exists ${clean}.s.t drop column if exists x;\n-- @purge-history clean.s.t\n",
+    )
+    write(
+        b,
+        "V0001__x.sql",
+        "-- a much better explanation\n\nalter table if exists ${clean}.s.t\n    drop column if exists x;  -- note\n"
+        "-- @purge-history clean.s.t\n",
+    )
+    write(
+        c, "V0001__x.sql", "alter table if exists ${clean}.s.t drop column if exists y;\n-- @purge-history clean.s.t\n"
+    )
+    write(d, "V0001__x.sql", "alter table if exists ${clean}.s.t drop column if exists x;\n")
+    (ma,), (mb,), (mc,), (md,) = (mr.discover(x) for x in (a, b, c, d))
+    assert ma.checksum == mb.checksum, "comment / whitespace edits do not change the checksum"
+    assert mc.checksum != ma.checksum, "a changed statement does"
+    assert md.checksum != ma.checksum, "a removed directive does"
+    assert mr.check([mb], {"0001": ("x", ma.checksum)}) == []
+    # lakes migrated before the normalisation recorded the raw-file checksum: still accepted
+    assert mr.check([ma], {"0001": ("x", ma.legacy_checksum)}) == []
+    with pytest.raises(mr.MigrationError):
+        mr.check([mb], {"0001": ("x", ma.legacy_checksum)})  # raw text of another file version
+
+
+def test_inline_comment_outside_literals_only():
+    assert mr._strip_inline_comment("select '--not a comment' -- comment") == "select '--not a comment'"

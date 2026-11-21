@@ -39,7 +39,10 @@ would disappear while the keystore and the facts still refer to their keys.
      and OPTIMIZE alone leaves a lone file without delete files untouched. The replaced files remain
      as noncurrent object versions until the maintenance job / bucket lifecycle removes them;
    * no key-like or CPR-shaped literal (query text is archived WORM; the runner refuses such files);
-   * never edit a migration once it is released: the runner compares checksums and stops.
+   * never change a statement or directive of a released migration: the runner compares checksums
+     and stops. The checksum covers the normalised SQL (comments and whitespace removed,
+     placeholders unresolved) plus the directives, so fixing a comment is fine. Lakes migrated
+     before this normalisation recorded the checksum of the raw file; that one is still accepted.
 
    Applied migrations are recorded in `curated.audit.schema_migrations` (version, name, checksum,
    statement count, time, principal, duration). The schema `curated.audit` is protected: only the
