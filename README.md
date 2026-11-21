@@ -27,7 +27,7 @@ Requirements: `uv`, `podman`, GNU make, python 3.13.
 
 ```bash
 make setup          # virtualenv from uv.lock
-make tools          # pinned opa + oras into .tools/bin (checksums verified)
+make tools          # pinned opa + oras into .tools/bin (checksums verified; linux amd64/arm64, macOS arm64)
 make lint           # ruff, shellcheck, opa fmt/check, dbt parse, PII classification
 make test           # pytest, opa test, dbt parse, dagster definitions validate
 make integration    # end-to-end on a throwaway podman harness (RustFS, Polaris, OPA, Trino)

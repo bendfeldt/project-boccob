@@ -116,9 +116,27 @@ while migrations are pending.
 | `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | push | optional login (otherwise log in beforehand) |
 | `REGISTRY_TLS_VERIFY=false`, `REGISTRY_PLAIN_HTTP=1` | push | local test registries only |
 | `BUILD_CA_BUNDLE`, `BUILD_PROXY`, `BUILD_NETWORK`, `UV_DEFAULT_INDEX`, `PYTHON_IMAGE`, `UV_IMAGE` | build | trust, proxy, package index and base images *inside* the image build (see `scripts/build-image.sh`) |
+| `PLATFORMS` | build | target platform(s): `linux/amd64` (x64), `linux/arm64`, or both comma separated. Default: the architecture of the podman host (on macOS the podman machine VM). The platform repository passes the cluster's architecture |
 
 Results: `dist/image/image.ref` and `dist/opa/bundle.ref` (digest-pinned references), SBOMs and the
 trivy report in `dist/image/`.
+
+**Architectures.** With one platform (the default) the image is a plain single-platform image and
+`image.ref` carries its manifest digest, as before. With `PLATFORMS=linux/amd64,linux/arm64`
+`build-image.sh` builds one image per platform (local names `<ref>-amd64`, `<ref>-arm64`, listed in
+`dist/image/image.local`) and a podman manifest list `<ref>`; `push-image.sh` pushes the list with
+all its images and records the **index digest** in `image.ref`, so one reference runs on both
+architectures (the platform signs that digest). SBOMs and scans are produced per platform
+(`sbom.<arch>.spdx.json`, `trivy.<arch>.json`; the native one also under the plain names). A
+foreign platform needs user-mode emulation on the build machine (qemu-user-static / binfmt_misc on
+Linux; on macOS the emulation must exist inside the podman machine VM - not verified) and is not smoke-tested unless `SMOKE_ALL=1`. The
+base images are pinned by their multi-arch index digest, and `make lint` checks
+(`scripts/check-wheels.py`) that every locked Python dependency has cp313 manylinux x86_64 and
+aarch64 wheels, so the arm64 build needs no compiler. `dbt-core-experimental-parser` is the one
+sdist: its build backend downloads a prebuilt, sha256-checked binary for the platform from the dbt
+GitHub release (x86_64 and aarch64 both published); air-gapped builds need that file mirrored.
+`make tools` / `tools-supply-chain` install the opa, oras, syft, trivy and cosign builds for this
+machine (linux/amd64, linux/arm64, darwin/arm64).
 
 Signing is done by the platform repository (`make sign`, cosign with the OpenBao transit key),
 not here: leave `COSIGN_KEY` unset (it exists only for a stand-alone build host). The air-gap
