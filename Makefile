@@ -62,10 +62,10 @@ integration: ## Full end-to-end test on the harness (starts and removes it)
 ingest: ## Land + index one delivery (SOURCE=borgerportal)
 	scripts/run.sh lakehouse-ingest run $(SOURCE)
 
-dbt-build: ## dbt build of clean, consolidated, curated (models + tests)
-	scripts/dbt.sh build
+dbt-build: ## Schema migrations (dev: applied; elsewhere: refuse if pending), then dbt build
+	scripts/dbt-build.sh
 
-migrate: ## Apply pending schema migrations (transform/migrations), see docs/releases.md
+migrate: ## Apply pending schema migrations (dev; elsewhere use the Dagster job `migrate`), docs/releases.md
 	scripts/run.sh lakehouse-migrate
 
 migrate-status: ## List applied and pending schema migrations (changes nothing)

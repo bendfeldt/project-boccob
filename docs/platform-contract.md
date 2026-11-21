@@ -121,6 +121,7 @@ to a mounted file; the dbt profile reads plain variables only.
 | `SCHEDULE_TIMEZONE` | | `Europe/Copenhagen` | |
 | `INGEST_START_DATE` | | `2026-01-01` | first daily partition |
 | `PURGE_S3_ACCESS_KEY_ID` | yes | `S3_ACCESS_KEY_ID` | key allowed to remove object versions: `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetObject`, `s3:GetObjectVersion`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on all four lakehouse buckets. Used by erasure (immediate, touched locations only) and maintenance (after the safety window); without it they fail (by design) on versioned buckets instead of leaving data behind. As deployed: only in the Secret named by `PURGE_CREDENTIALS_SECRET` |
+| `MIGRATION_LOCK_TTL_HOURS` | | `6` | age after which an abandoned schema-migration lock row (`curated.audit.schema_migration_lock`) is ignored and removed |
 | `NONCURRENT_VERSION_GRACE_DAYS` | | `7` | deletion safety window: maintenance removes noncurrent object versions only after this many days (or the layer's orphan retention, if longer). Set it equal to the bucket lifecycle `lakehouse_noncurrent_version_days` |
 | `PURGE_S3_SECRET_ACCESS_KEY` | yes | | |
 | `ERASURE_VERIFY_STORAGE` | | `false` | object scan after an erasure: `scoped` = every object version under the locations of the touched tables and the subject's raw files (cost grows with those tables; recommended for test/prod); `full` (or `true`) = every version of the four lake buckets, O(lake) per request - for audits and small lakes only; `false` = SQL verification only |

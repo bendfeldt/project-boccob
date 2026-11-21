@@ -66,14 +66,23 @@ def test_recorded_history_is_checked(tmp_path):
 
 
 class FakeTrino:
-    def __init__(self, applied=(), columns=(), insert_rows=1):
+    def __init__(self, applied=(), columns=(), insert_rows=1, locks=()):
         self.applied = list(applied)
         self.columns = list(columns)
         self.insert_rows = insert_rows
+        self.locks = list(locks)  # (token, holder, acquired_at)
         self.statements: list[str] = []
 
     def execute(self, sql, params=None):
         self.statements.append(sql)
+        if "schema_migration_lock" in sql:
+            if sql.startswith("insert"):
+                self.locks.append((params[0], params[1], "9999"))
+            elif sql.startswith("select"):
+                return [list(r) for r in sorted(self.locks, key=lambda r: (r[2], r[0]))]
+            elif sql.startswith("delete") and params:
+                self.locks = [r for r in self.locks if r[0] != params[0]]
+            return [[1]]
         if sql.startswith("select version"):
             return [list(a) for a in self.applied]
         if sql.startswith("insert into"):
@@ -214,3 +223,38 @@ def test_checksum_ignores_comments_and_whitespace_but_not_statements(tmp_path):
 
 def test_inline_comment_outside_literals_only():
     assert mr._strip_inline_comment("select '--not a comment' -- comment") == "select '--not a comment'"
+
+
+def test_lock_is_taken_and_released(tmp_path):
+    write(tmp_path, "V0001__a.sql", "select 1;")
+    trino = FakeTrino()
+    assert mr.run_migrations(directory=tmp_path, trino=trino, check_drift=False, holder="cli").applied == ["V0001__a"]
+    inserts = [s for s in trino.statements if s.startswith("insert") and "schema_migration_lock" in s]
+    assert len(inserts) == 1 and trino.locks == [], "lock row removed afterwards"
+    # nothing pending: no lock at all (the daily jobs stay cheap)
+    again = FakeTrino(applied=trino.applied)
+    mr.run_migrations(directory=tmp_path, trino=again, check_drift=False)
+    assert not [s for s in again.statements if "schema_migration_lock" in s]
+
+
+def test_concurrent_runner_is_refused(tmp_path):
+    write(tmp_path, "V0001__a.sql", "select 1;")
+    trino = FakeTrino(locks=[("other", "dagster run 42", "0000")])  # older live lock
+    with pytest.raises(mr.MigrationLockError, match="dagster run 42"):
+        mr.run_migrations(directory=tmp_path, trino=trino, check_drift=False, holder="cli")
+    assert trino.locks == [("other", "dagster run 42", "0000")], "own row withdrawn, the holder's kept"
+    assert not [s for s in trino.statements if s == "select 1"], "nothing applied"
+
+
+def test_cli_refuses_to_apply_outside_dev_without_confirmation(monkeypatch):
+    from governance.migrations import cli
+
+    monkeypatch.setenv("LAKEHOUSE_ENV", "prod")
+    monkeypatch.setattr(cli, "run_migrations", lambda **k: pytest.fail("must not apply"))
+    with pytest.raises(SystemExit) as caught:
+        cli.main([])
+    assert caught.value.code == 2
+
+    pending = mr.MigrationReport(pending=["V0001__a"])
+    monkeypatch.setattr(cli, "run_migrations", lambda **k: pending)
+    assert cli.main(["--check"]) == cli.EXIT_PENDING

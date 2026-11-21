@@ -69,8 +69,16 @@ migrations. Every dbt model without an upstream model depends on it, so in `dail
 `transform` the migrations always run before the first model of a release. The job `migrate` runs
 them alone. The `erasure` and `retention` jobs run them as their first step as well, because their
 SQL is derived from the release's model metadata and may already refer to a new column.
-By hand: `make migrate-status` (read-only) and `make migrate` (`lakehouse-migrate`), only while no
-other writer is active.
+Every runner takes an advisory lock row in `curated.audit.schema_migration_lock` (protected schema;
+the oldest live row wins, abandoned rows expire after `MIGRATION_LOCK_TTL_HOURS`, default 6), so the
+Dagster asset, the ops and the CLI never apply migrations concurrently; when nothing is pending no
+lock is taken.
+
+By hand: `make migrate-status` (read-only), `lakehouse-migrate --check` (exit 3 when pending) and
+`make migrate` (`lakehouse-migrate`). The CLI is not serialised with the other Dagster writers, so
+outside dev it applies only with `--outside-dagster` (schedules paused, no run active); prefer the
+Dagster job. `make dbt-build` runs the migrations first in dev and refuses to build elsewhere
+while migrations are pending.
 
 ## Release procedure
 

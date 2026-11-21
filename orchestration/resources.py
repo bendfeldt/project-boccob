@@ -38,10 +38,10 @@ class GovernanceResource(dg.ConfigurableResource):
 
     verify_storage_after_erasure: str = "off"  # off | scoped | full (ERASURE_VERIFY_STORAGE)
 
-    def migrate(self, dry_run: bool = False, check_drift: bool = True):
+    def migrate(self, dry_run: bool = False, check_drift: bool = True, holder: str = "dagster"):
         from governance.migrations.runner import run_migrations
 
-        return run_migrations(dry_run=dry_run, check_drift=check_drift)
+        return run_migrations(dry_run=dry_run, check_drift=check_drift, holder=holder)
 
     def maintain(self, layers: tuple[str, ...], operations: tuple[str, ...]):
         from governance.maintenance.runner import run_maintenance
