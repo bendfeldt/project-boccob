@@ -73,8 +73,8 @@ other writer is active.
    builds the lake with the previous model shape, upgrades it with the new release (migrations through
    `daily_refresh`) and checks that keystore keys, SCD2 versions and the clean history survive. Add
    the previous shape of your change to `previous_release_project()` in `tests/integration/test_e2e.py`.
-2. **Build and publish** the artifacts (`make image image-push bundle bundle-push`) and hand the
-   digest-pinned references to the platform repository.
+2. **Build and publish** the artifacts (see *Publishing* below) and hand the digest-pinned
+   references to the platform repository.
 3. **Before the deployment:** make sure a recent backup of the lake exists (platform: Polaris database,
    bucket versioning / off-site copy). A migration that rewrites data is not reversible otherwise.
 4. **Deploy** the new image and bundle (IaC). Let running jobs finish; schedules may stay on - every
@@ -85,6 +85,32 @@ other writer is active.
    migrated - idempotent statements make the re-run safe): fix forward with a new release.
 6. **Verify.** The next `daily_refresh` must pass all asset checks (keystore integrity, stability
    since baseline, SCD2, usage).
+
+## Publishing
+
+`make image image-push bundle bundle-push` (scripts `build-image.sh`, `push-image.sh`,
+`build-opa-bundle.sh`, `push-opa-bundle.sh`). The platform repository wraps them in
+`make release-publish ENV=<env>`, which sets the variables below; the interface is stable:
+
+| Variable | Used by | Meaning |
+|---|---|---|
+| `REGISTRY` (required for push) | build, push | registry host[:port], e.g. the environment's Zot |
+| `REGISTRY_NAMESPACE` | build, push | repository prefix, default `boccob` |
+| `VERSION` | build, push | artifact version, default `0.1.0-<git describe>` |
+| `REGISTRY_CA_FILE` | push | PEM of the CA that signed the registry certificate. Passed per call: podman gets `--cert-dir` (a temporary directory with `ca.crt`), oras `--ca-file`, cosign an `SSL_CERT_FILE` of current trust + this CA. Nothing is written to `/etc`; the temporary directory is removed when the script ends |
+| `REGISTRY_HOST` | push | host[:port] appended to `NO_PROXY`/`no_proxy` for the call (default: host part of `REGISTRY`), so an outbound proxy is not used for the internal registry |
+| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | push | optional login (otherwise log in beforehand) |
+| `REGISTRY_TLS_VERIFY=false`, `REGISTRY_PLAIN_HTTP=1` | push | local test registries only |
+| `BUILD_CA_BUNDLE`, `BUILD_PROXY`, `BUILD_NETWORK`, `UV_DEFAULT_INDEX`, `PYTHON_IMAGE`, `UV_IMAGE` | build | trust, proxy, package index and base images *inside* the image build (see `scripts/build-image.sh`) |
+
+Results: `dist/image/image.ref` and `dist/opa/bundle.ref` (digest-pinned references), SBOMs and the
+trivy report in `dist/image/`.
+
+Signing is done by the platform repository (`make sign`, cosign with the OpenBao transit key),
+not here: leave `COSIGN_KEY` unset (it exists only for a stand-alone build host). The air-gap
+path - moving the image, its signature and attestations and the OPA bundle by digest into an
+air-gapped environment's Zot - is likewise a platform script; this repository only produces the
+artifacts and their digests.
 
 ## Break-glass repair of protected schemas
 

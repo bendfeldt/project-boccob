@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Publish the OPA bundle as an OCI artifact (the layout OPA's OCI bundle downloader expects).
+# Stable interface (called by the IaC `make release-publish`; documented in docs/releases.md):
 #   REGISTRY           registry host[:port], e.g. zot.dev.lakehouse.internal   (required)
 #   REGISTRY_NAMESPACE repository prefix, default "boccob"
+#   VERSION            artifact version (default 0.1.0-<git describe>)
+#   REGISTRY_CA_FILE   CA (PEM) of the registry certificate, passed to oras as --ca-file
+#   REGISTRY_HOST      host[:port] added to NO_PROXY/no_proxy for this run (default: from REGISTRY)
 #   REGISTRY_PLAIN_HTTP=1 for a registry without TLS (local testing only)
 #   credentials: `oras login` beforehand, or REGISTRY_USERNAME / REGISTRY_PASSWORD
 # Result: <REGISTRY>/<REGISTRY_NAMESPACE>/opa-policy-bundle:<VERSION>  (digest in dist/opa/bundle.ref)
@@ -15,7 +19,8 @@ REF="${REGISTRY}/${REGISTRY_NAMESPACE:-boccob}/opa-policy-bundle:${VERSION}"
 OUT="$ROOT/dist/opa"
 [[ -f "$OUT/bundle.tar.gz" ]] || "$ROOT/scripts/build-opa-bundle.sh" >/dev/null
 
-flags=()
+registry_trust
+flags=("${REGISTRY_ORAS_ARGS[@]}")
 [[ "${REGISTRY_PLAIN_HTTP:-0}" == "1" ]] && flags+=(--plain-http)
 if [[ -n "${REGISTRY_USERNAME:-}" ]]; then
   printf '%s' "${REGISTRY_PASSWORD:?}" | oras login "${flags[@]}" -u "$REGISTRY_USERNAME" --password-stdin "$REGISTRY"
