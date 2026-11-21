@@ -11,6 +11,8 @@
 #   COSIGN_KEY                  optional: sign + attach the SBOM here. On the platform signing is
 #                               done by the IaC (`make sign`, OpenBao transit key) - leave it unset
 # Result: dist/image/image.ref = <registry>/<ns>/dagster-code-location@sha256:...
+#   single-platform build: the image manifest digest; multi-platform build (PLATFORMS with
+#   several entries, see build-image.sh): the digest of the pushed INDEX (manifest list)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 need podman
@@ -22,13 +24,20 @@ REF="${REPO}:${VERSION}"
 OUT="$ROOT/dist/image"
 mkdir -p "$OUT"
 registry_trust
-podman image exists "$REF" || die "image $REF not built - run scripts/build-image.sh with the same REGISTRY/VERSION"
+multi=false
+if podman manifest exists "$REF" 2>/dev/null; then multi=true
+else podman image exists "$REF" || die "image $REF not built - run scripts/build-image.sh with the same REGISTRY/VERSION"; fi
 
 tls=(--tls-verify="${REGISTRY_TLS_VERIFY:-true}" "${REGISTRY_PODMAN_ARGS[@]}")
 if [[ -n "${REGISTRY_USERNAME:-}" ]]; then
   printf '%s' "${REGISTRY_PASSWORD:?}" | podman login "${tls[@]}" -u "$REGISTRY_USERNAME" --password-stdin "$REGISTRY"
 fi
-podman push "${tls[@]}" --digestfile "$OUT/image.digest" "$REF"
+if $multi; then
+  log "pushing manifest list $REF ($(podman manifest inspect "$REF" | jq -r '[.manifests[].platform | "\(.os)/\(.architecture)"] | join(", ")'))"
+  podman manifest push "${tls[@]}" --all --digestfile "$OUT/image.digest" "$REF" "docker://$REF"
+else
+  podman push "${tls[@]}" --digestfile "$OUT/image.digest" "$REF"
+fi
 DIGEST_REF="${REPO}@$(cat "$OUT/image.digest")"
 echo "$DIGEST_REF" > "$OUT/image.ref"
 

@@ -9,11 +9,12 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 STATE_DIR="${HARNESS_STATE_DIR:-$ROOT/.harness}"
 NET=sol-test
 
-# image pins (tag@digest); override through the environment for mirrors
-RUSTFS_IMAGE="${RUSTFS_IMAGE:-docker.io/rustfs/rustfs:v1.0.0-rc.5}"
-POLARIS_IMAGE="${POLARIS_IMAGE:-docker.io/apache/polaris:1.9.0}"
-TRINO_IMAGE="${TRINO_IMAGE:-docker.io/trinodb/trino:484}"
-OPA_IMAGE="${OPA_IMAGE:-docker.io/openpolicyagent/opa:1.22.4-static}"
+# image pins (tag@INDEX digest: podman picks the linux/amd64 or linux/arm64 image of the
+# podman host, e.g. the podman machine VM on macOS); override through the environment for mirrors
+RUSTFS_IMAGE="${RUSTFS_IMAGE:-docker.io/rustfs/rustfs:v1.0.0-rc.5@sha256:b7014e0ce2bc703c1316b3ef760e29dfae61fe4a50d1a66fa89638e0f8ea211f}"
+POLARIS_IMAGE="${POLARIS_IMAGE:-docker.io/apache/polaris:1.9.0@sha256:bc548500f5ba8e798b7f8e107ad0b8fbd5b5c6d0c5437f56c5ca101219b796d0}"
+TRINO_IMAGE="${TRINO_IMAGE:-docker.io/trinodb/trino:484@sha256:2704eb53935af5e582d63d6033e9bf99d20c325e9b0e30b1016ef59a4773979f}"
+OPA_IMAGE="${OPA_IMAGE:-docker.io/openpolicyagent/opa:1.22.4-static@sha256:12cecac5a174368f7d3f09d3a19d040ebe0c91d576e520335ae7a985a26e39d3}"
 
 RUSTFS_PORT="${RUSTFS_PORT:-19000}"
 POLARIS_PORT="${POLARIS_PORT:-18181}"

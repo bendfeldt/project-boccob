@@ -11,6 +11,47 @@ log() { printf '[%s] %s\n' "$(basename "$0")" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found - run 'make tools' (or 'make setup' for python deps)"; }
 
+# Platform of THIS machine for tool downloads: linux/amd64 (x64, x86_64), linux/arm64
+# (aarch64) or darwin/arm64 (Apple Silicon). Anything else fails with a clear message.
+host_platform() {
+  local os arch m
+  case "$(uname -s)" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    *) die "operating system $(uname -s) is not supported (Linux or macOS)" ;;
+  esac
+  m="$(uname -m)"
+  if [[ "$os" == darwin && "$m" == x86_64 && "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" == 1 ]]; then
+    die "this shell runs under Rosetta 2 (x86_64 emulation); use a native arm64 shell"
+  fi
+  case "$m" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    i?86|x86) die "32-bit x86 ($m) is not supported: x64 (x86_64/amd64) or arm64 only" ;;
+    *) die "CPU architecture $m is not supported: x64 (x86_64/amd64) or arm64 only" ;;
+  esac
+  [[ "$os/$arch" != darwin/amd64 ]] || die "Intel Macs are not supported by the pinned tool downloads (install opa/oras/syft/trivy/cosign with Homebrew)"
+  printf '%s/%s' "$os" "$arch"
+}
+
+# Architecture of the machine that RUNS the containers (for macOS: the podman machine VM,
+# not the Mac): amd64 or arm64.
+container_arch() {
+  local a
+  a="$(podman info --format '{{.Host.Arch}}' 2>/dev/null)" || die "podman is not reachable (podman machine start?)"
+  case "$a" in
+    amd64|x86_64) echo amd64 ;;
+    arm64|aarch64) echo arm64 ;;
+    *) die "podman host architecture $a is not supported (amd64 or arm64)" ;;
+  esac
+}
+
+# sha256 of a file (GNU coreutils or macOS shasum)
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
 # Load local environment: .env (developer) or the integration harness env, if present.
 load_env() {
   if [[ -f "$ROOT/.env" ]]; then set -a; source "$ROOT/.env"; set +a

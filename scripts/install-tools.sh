@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install pinned CLI tools into .tools/bin (no root needed). Downloads come from GitHub releases
-# and are verified against the checksum files published with each release.
+# and are verified against the checksum files published with each release. The build matches
+# this machine: linux/amd64 (x64), linux/arm64 or darwin/arm64 (Apple Silicon); see host_platform.
 #   usage: scripts/install-tools.sh [opa] [oras] [syft] [trivy] [cosign]   (default: opa oras)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -15,6 +16,9 @@ BIN="$ROOT/.tools/bin"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$BIN"
+PLATFORM="$(host_platform)"
+OS="${PLATFORM%/*}" ARCH="${PLATFORM#*/}"
+log "platform: $PLATFORM"
 
 fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
 
@@ -23,16 +27,17 @@ verify() { # file checksums-file  (checksum file lists "<sha256>  <name>")
   name="$(basename "$file")"
   want="$(awk -v n="$name" '$2 == n || $2 == "*"n || $2 == "./"n {print $1}' "$sums" | head -n1)"
   [[ -n "$want" ]] || die "no checksum for $name"
-  got="$(sha256sum "$file" | awk '{print $1}')"
+  got="$(sha256_file "$file")"
   [[ "$want" == "$got" ]] || die "checksum mismatch for $name"
 }
 
 install_opa() {
   local base="https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}"
-  fetch "$base/opa_linux_amd64_static" "$TMP/opa_linux_amd64_static"
-  fetch "$base/opa_linux_amd64_static.sha256" "$TMP/opa.sha256"
-  verify "$TMP/opa_linux_amd64_static" "$TMP/opa.sha256"
-  install -m 0755 "$TMP/opa_linux_amd64_static" "$BIN/opa"
+  local f="opa_${OS}_${ARCH}_static"
+  fetch "$base/$f" "$TMP/$f"
+  fetch "$base/$f.sha256" "$TMP/opa.sha256"
+  verify "$TMP/$f" "$TMP/opa.sha256"
+  install -m 0755 "$TMP/$f" "$BIN/opa"
 }
 
 install_tarball() { # name url checksums-url binary-in-archive
@@ -48,22 +53,27 @@ install_tarball() { # name url checksums-url binary-in-archive
 
 install_oras() {
   local base="https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}"
-  install_tarball oras "$base/oras_${ORAS_VERSION}_linux_amd64.tar.gz" "$base/oras_${ORAS_VERSION}_checksums.txt" oras
+  install_tarball oras "$base/oras_${ORAS_VERSION}_${OS}_${ARCH}.tar.gz" "$base/oras_${ORAS_VERSION}_checksums.txt" oras
 }
 install_syft() {
   local base="https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}"
-  install_tarball syft "$base/syft_${SYFT_VERSION}_linux_amd64.tar.gz" "$base/syft_${SYFT_VERSION}_checksums.txt" syft
+  install_tarball syft "$base/syft_${SYFT_VERSION}_${OS}_${ARCH}.tar.gz" "$base/syft_${SYFT_VERSION}_checksums.txt" syft
 }
 install_trivy() {
   local base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
-  install_tarball trivy "$base/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" "$base/trivy_${TRIVY_VERSION}_checksums.txt" trivy
+  local name
+  case "$PLATFORM" in
+    linux/amd64) name=Linux-64bit ;; linux/arm64) name=Linux-ARM64 ;; darwin/arm64) name=macOS-ARM64 ;;
+  esac
+  install_tarball trivy "$base/trivy_${TRIVY_VERSION}_${name}.tar.gz" "$base/trivy_${TRIVY_VERSION}_checksums.txt" trivy
 }
 install_cosign() {
   local base="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
-  fetch "$base/cosign-linux-amd64" "$TMP/cosign-linux-amd64"
+  local f="cosign-${OS}-${ARCH}"
+  fetch "$base/$f" "$TMP/$f"
   fetch "$base/cosign_checksums.txt" "$TMP/cosign.sums"
-  verify "$TMP/cosign-linux-amd64" "$TMP/cosign.sums"
-  install -m 0755 "$TMP/cosign-linux-amd64" "$BIN/cosign"
+  verify "$TMP/$f" "$TMP/cosign.sums"
+  install -m 0755 "$TMP/$f" "$BIN/cosign"
 }
 
 tools=("$@"); [[ ${#tools[@]} -gt 0 ]] || tools=(opa oras)

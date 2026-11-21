@@ -25,6 +25,9 @@ opa check --strict governance/policies
 log "dbt parse"
 "$ROOT/scripts/dbt.sh" --warn-error parse >/dev/null
 
+log "wheels for linux/amd64 + linux/arm64 (uv.lock)"
+uv run python -I "$ROOT/scripts/check-wheels.py" "$ROOT/uv.lock"
+
 log "PII classification"
 uv run lakehouse-pii check
 log "lint ok"

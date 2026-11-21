@@ -1,8 +1,9 @@
 # Dagster code location image: ingestion (dlt) + transform (dbt project) + orchestration + governance tooling.
-# Build with scripts/build-image.sh (podman). Base images are pinned by digest; override the ARGs
+# Build with scripts/build-image.sh (podman). Base images are pinned by their multi-arch INDEX digest
+# (linux/amd64 + linux/arm64: podman build --platform picks the matching image); override the ARGs
 # with the mirrored references in the internal registry for air-gapped builds.
 ARG PYTHON_IMAGE=docker.io/library/python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.32@sha256:0d127b3a7049b879a6e18a79c7f33fea59aa83c226464248f89cfb716a6b96f5
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.32@sha256:df4cae8f3a96d175e2e5f992e597550000edbe78fdc2594d5cd8de1a217f504c
 
 FROM ${UV_IMAGE} AS uv
 
