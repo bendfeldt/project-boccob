@@ -24,7 +24,8 @@ need curl
 need uv
 load_platform_env BOCCOB_ENV BOCCOB_KUBECONFIG BOCCOB_CA_BUNDLE BOCCOB_TRINO_URL BOCCOB_KEYCLOAK_URL \
   BOCCOB_KEYCLOAK_REALM BOCCOB_KEYCLOAK_CLIENT_ID BOCCOB_KEYCLOAK_CLIENT_SECRET_FILE \
-  BOCCOB_DAGSTER_NAMESPACE BOCCOB_CODE_LOCATION BOCCOB_CODE_LOCATION_NAME BOCCOB_DAGSTER_GRAPHQL_URL \
+  BOCCOB_DAGSTER_NAMESPACE BOCCOB_CODE_LOCATION BOCCOB_CODE_LOCATION_NAME BOCCOB_DAGSTER_WEBSERVER \
+  BOCCOB_DAGSTER_GRAPHQL_URL \
   BOCCOB_TEST_ANALYST_USER BOCCOB_TEST_ANALYST_PASSWORD_FILE BOCCOB_TEST_PII_READER_USER \
   BOCCOB_TEST_PII_READER_PASSWORD_FILE
 [[ "$BOCCOB_ENV" == "dev" || "${ALLOW_E2E:-0}" == "1" ]] || die "e2e writes test data: dev only (ALLOW_E2E=1 to override)"
@@ -51,9 +52,11 @@ for row in TrinoClient(source="boccob-e2e").execute(sys.stdin.read()):
 }
 one() { sa "$1" | head -1 | jq -r '.[0]'; }
 
-# dagster_gql : GraphQL request (JSON on stdin) to the webserver, sent from the code location pod
+# dagster_gql : GraphQL request (JSON on stdin), sent from inside the webserver pod
 dagster_gql() {
-  pod_py 'import os, sys, urllib.request
+  local container=()
+  [[ -z "${BOCCOB_DAGSTER_WEBSERVER_CONTAINER:-}" ]] || container=(-c "$BOCCOB_DAGSTER_WEBSERVER_CONTAINER")
+  kc exec -i "$BOCCOB_DAGSTER_WEBSERVER" "${container[@]}" -- python -I -c 'import sys, urllib.request
 req = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={"Content-Type": "application/json"})
 print(urllib.request.urlopen(req, timeout=60).read().decode())' "$BOCCOB_DAGSTER_GRAPHQL_URL"
 }

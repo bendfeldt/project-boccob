@@ -226,7 +226,9 @@ solution uses:
 | `BOCCOB_DAGSTER_NAMESPACE` | e2e, reset | namespace of the Dagster deployment, e.g. `orchestration` |
 | `BOCCOB_CODE_LOCATION` | e2e, reset | `kubectl exec` target of the code location deployment, e.g. `deploy/<name>`; its environment (svc-dagster, `PURGE_CREDENTIALS_SECRET`) is used as is |
 | `BOCCOB_CODE_LOCATION_NAME` | e2e | Dagster code location (repository location) name, e.g. `lakehouse` |
-| `BOCCOB_DAGSTER_GRAPHQL_URL` | e2e | Dagster webserver GraphQL endpoint reachable **from the code location pod**, e.g. `http://<webserver service>.<namespace>.svc:80/graphql` |
+| `BOCCOB_DAGSTER_WEBSERVER` | e2e | `kubectl exec` target of the Dagster webserver, e.g. `deploy/<name>`; GraphQL requests are sent from inside it (python) |
+| `BOCCOB_DAGSTER_WEBSERVER_CONTAINER` | e2e | optional: its container, e.g. `dagster` |
+| `BOCCOB_DAGSTER_GRAPHQL_URL` | e2e | GraphQL endpoint as seen from inside that container, e.g. `http://127.0.0.1:80/graphql` |
 | `BOCCOB_DAGSTER_URL` | (docs) | Dagster UI for people |
 | `BOCCOB_CA_BUNDLE` | e2e | CA bundle that verifies the public Trino and Keycloak endpoints |
 | `BOCCOB_TRINO_URL` | e2e | public Trino endpoint, e.g. `https://trino.dev.lakehouse.internal` (host names must resolve on the developer machine) |
