@@ -205,8 +205,11 @@ models:
   - name: dp_payment_summary
     description: >
       Data product "Payment summary": monthly payment totals per municipality and case type.
-      Aggregated, contains no person-level data. Cells based on fewer than 5 citizens are flagged
-      (is_small_cell) and hidden from analysts by an OPA row filter.
+      Aggregated, contains no person-level data. Cells based on fewer than 5 persons are flagged
+      (is_small_cell) and filtered out by OPA for every reader of the product without an exempt
+      group - the dashboard and the open-data export read it this way. This is disclosure control
+      for the publication, not a barrier for analysts: they also read the pseudonymised, masked
+      fact and dimensions (docs/gdpr.md).
     access: public
     latest_version: 1
     versions:

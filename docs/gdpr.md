@@ -14,7 +14,7 @@ in the record of processing activities.
 | CPR confined to the raw layer | native files and the masked `payload` of the raw index | integration test (no CPR column or value in clean, consolidated or curated) |
 | Retention | `governance/retention.yml` + dbt `meta.gdpr` | Dagster job `retention` |
 | Right to erasure | `governance/erasure` | CLI `lakehouse-erase`, Dagster job `erasure`, audit table |
-| Disclosure control for published aggregates | `dp_payment_summary.is_small_cell` + row filter | Trino OPA plugin (row filters) |
+| Disclosure control for published aggregates | `dp_payment_summary.is_small_cell` + row filter | Trino OPA plugin (row filters), see below |
 
 ## Classification
 
@@ -60,6 +60,13 @@ Groups are the Keycloak groups of the architecture contract.
 
 * Everything not explicitly allowed is denied; users without one of these groups cannot run queries.
   Impersonation, catalog management and authorization changes are denied for everyone.
+* Small cells: `dp_payment_summary` hides cells of fewer than 5 persons from every reader without
+  `platform-admin`, `data-engineer` or `pii-reader`. That protects what is *published* from the
+  product (dashboard, open-data export: they must read the product, never the fact). It does not
+  stop an analyst from aggregating `fact_payment` and `dim_citizen` (pseudonym, postal code, birth
+  year, amounts) down to single persons: analysts are internal staff authorised for pseudonymised
+  row-level data, under the controller's access review. If that is not intended, move the data
+  products to their own schema and grant `analyst` read on that schema only.
 * Masks: `redact` -> `'*****'`, `email` -> local part replaced, `hash` -> SHA-256, `null` and every
   non-text column -> `NULL`. In `raw`, `payload` is masked for everyone without `pii-reader`
   (the record text cannot be masked field by field).
