@@ -1,4 +1,5 @@
 import gzip
+import io
 import json
 import re
 from datetime import UTC, datetime
@@ -124,7 +125,7 @@ ENTITY = EntitySpec(name="citizens", format="json", options={"record_path": "dat
 
 def test_records_table_schema_rows_and_subject_keys():
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    (table,) = list(records_table(_entry(CITIZENS), ENTITY, CITIZENS, PEPPER, now))
+    (table,) = list(records_table(_entry(CITIZENS), ENTITY, lambda: io.BytesIO(CITIZENS), PEPPER, now))
     assert table.schema.equals(INDEX_SCHEMA)
     rows = table.to_pylist()
     assert [r["_raw_row"] for r in rows] == [1, 2]
@@ -136,7 +137,7 @@ def test_records_table_schema_rows_and_subject_keys():
 
 def test_records_table_refuses_tampered_file():
     with pytest.raises(ChecksumMismatchError):
-        list(records_table(_entry(CITIZENS), ENTITY, CITIZENS + b" ", PEPPER, datetime.now(UTC)))
+        list(records_table(_entry(CITIZENS), ENTITY, lambda: io.BytesIO(CITIZENS + b" "), PEPPER, datetime.now(UTC)))
 
 
 def test_identifiers_require_a_pepper():

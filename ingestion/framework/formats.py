@@ -12,7 +12,7 @@ import csv
 import io
 import json
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import IO, Any
 
 from defusedxml import ElementTree as SafeET
 
@@ -35,8 +35,13 @@ def _walk(doc: Any, path: str | None) -> Any:
     return doc
 
 
-def _json(data: bytes, options: Mapping[str, Any]) -> Iterator[str]:
-    doc = json.loads(data.decode(options.get("encoding", "utf-8")))
+def _text(data: IO[bytes], options: Mapping[str, Any], default: str = "utf-8") -> io.TextIOWrapper:
+    return io.TextIOWrapper(data, encoding=options.get("encoding", default), newline="")
+
+
+def _json(data: IO[bytes], options: Mapping[str, Any]) -> Iterator[str]:
+    # shortcut: a JSON document is parsed whole (no streaming parser installed); use jsonl for big feeds
+    doc = json.load(_text(data, options))
     records = _walk(doc, options.get("record_path"))
     if isinstance(records, list):
         for rec in records:
@@ -45,16 +50,15 @@ def _json(data: bytes, options: Mapping[str, Any]) -> Iterator[str]:
         yield _dumps(records)
 
 
-def _jsonl(data: bytes, options: Mapping[str, Any]) -> Iterator[str]:
-    for line in data.decode(options.get("encoding", "utf-8")).splitlines():
+def _jsonl(data: IO[bytes], options: Mapping[str, Any]) -> Iterator[str]:
+    for line in _text(data, options):
         if line.strip():
             yield line.strip()
 
 
-def _csv(data: bytes, options: Mapping[str, Any]) -> Iterator[str]:
-    text = data.decode(options.get("encoding", "utf-8-sig"))
+def _csv(data: IO[bytes], options: Mapping[str, Any]) -> Iterator[str]:
     reader = csv.DictReader(
-        io.StringIO(text, newline=""),
+        _text(data, options, "utf-8-sig"),
         delimiter=options.get("delimiter", ","),
         quotechar=options.get("quotechar", '"'),
     )
@@ -84,33 +88,34 @@ def _element_to_obj(elem: Any) -> Any:
     return obj
 
 
-def _xml(data: bytes, options: Mapping[str, Any]) -> Iterator[str]:
+def _xml(data: IO[bytes], options: Mapping[str, Any]) -> Iterator[str]:
     tag = options.get("record_tag")
     if not tag:
         raise FormatError("xml entities need options.record_tag")
-    root = SafeET.fromstring(data)
-    for elem in root.iter(tag):
-        yield _dumps(_element_to_obj(elem))
+    for _, elem in SafeET.iterparse(data, events=("end",)):
+        if elem.tag == tag:
+            yield _dumps(_element_to_obj(elem))
+            elem.clear()  # streaming: a processed record is not kept in memory
 
 
-def _parquet(data: bytes, options: Mapping[str, Any]) -> Iterator[str]:
+def _parquet(data: IO[bytes], options: Mapping[str, Any]) -> Iterator[str]:
     import pyarrow.parquet as pq
 
-    table = pq.read_table(io.BytesIO(data))
-    for row in table.to_pylist():
-        yield _dumps(row)
+    for batch in pq.ParquetFile(data).iter_batches():
+        for row in batch.to_pylist():
+            yield _dumps(row)
 
 
 _SPLITTERS = {"json": _json, "jsonl": _jsonl, "csv": _csv, "xml": _xml, "parquet": _parquet}
 
 
-def iter_records(fmt: str, data: bytes, options: Mapping[str, Any] | None = None) -> Iterator[str]:
-    """Yield every record of a native file as JSON text, in file order."""
+def iter_records(fmt: str, data: bytes | IO[bytes], options: Mapping[str, Any] | None = None) -> Iterator[str]:
+    """Yield every record of a native file (bytes or a binary file object) as JSON text, in file order."""
     try:
         splitter = _SPLITTERS[fmt]
     except KeyError:
         raise FormatError(f"unsupported format {fmt!r}") from None
-    yield from splitter(data, options or {})
+    yield from splitter(io.BytesIO(data) if isinstance(data, bytes) else data, options or {})
 
 
 def extract_field(record_json: str, path: str) -> str | None:

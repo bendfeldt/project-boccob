@@ -22,11 +22,13 @@ instead of duplicating. ``reindex=True`` rewrites the requested load (dev only).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import IO
 
 import dlt
 import pyarrow as pa
@@ -34,7 +36,7 @@ from dlt.destinations.adapters import iceberg_adapter, iceberg_partition
 
 from ingestion.framework import dlt_support
 from ingestion.framework.formats import extract_field, iter_records
-from ingestion.framework.manifest import ManifestEntry, read_manifests, sha256_hex
+from ingestion.framework.manifest import ManifestEntry, read_manifests
 from ingestion.framework.pseudonym import pseudonymise
 from ingestion.framework.spec import EntitySpec, SourceSpec
 from lakehouse.settings import PolarisSettings, S3Settings, pseudonym_pepper
@@ -85,10 +87,20 @@ def subject_keys(record_json: str, entity: EntitySpec, pepper: str | None) -> st
 
 
 def records_table(
-    entry: ManifestEntry, entity: EntitySpec, content: bytes, pepper: str | None, loaded_at: datetime
+    entry: ManifestEntry,
+    entity: EntitySpec,
+    open_file: Callable[[], IO[bytes]],
+    pepper: str | None,
+    loaded_at: datetime,
 ) -> Iterator[pa.Table]:
-    """Render one native file into index rows (pure function of file bytes + config)."""
-    if sha256_hex(content) != entry.sha256:
+    """Render one native file into index rows (pure function of file bytes + config).
+
+    The file is read twice as a stream (checksum, then records), never held in memory whole."""
+    digest = hashlib.sha256()
+    with open_file() as f:
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+    if digest.hexdigest() != entry.sha256:
         raise ChecksumMismatchError(f"{entry.path}: content does not match the manifest checksum")
     batch: list[dict] = []
 
@@ -97,21 +109,22 @@ def records_table(
         batch.clear()
         return table
 
-    for row_no, record in enumerate(iter_records(entity.format, content, entity.options), start=1):
-        batch.append(
-            {
-                "payload": record,
-                "_raw_file": entry.path,
-                "_raw_row": row_no,
-                "_load_id": entry.load_id,
-                "_loaded_at": loaded_at,
-                "_raw_format": entity.format,
-                "_raw_sha256": entry.sha256,
-                "_subject_keys": subject_keys(record, entity, pepper),
-            }
-        )
-        if len(batch) >= BATCH_ROWS:
-            yield flush()
+    with open_file() as f:
+        for row_no, record in enumerate(iter_records(entity.format, f, entity.options), start=1):
+            batch.append(
+                {
+                    "payload": record,
+                    "_raw_file": entry.path,
+                    "_raw_row": row_no,
+                    "_load_id": entry.load_id,
+                    "_loaded_at": loaded_at,
+                    "_raw_format": entity.format,
+                    "_raw_sha256": entry.sha256,
+                    "_subject_keys": subject_keys(record, entity, pepper),
+                }
+            )
+            if len(batch) >= BATCH_ROWS:
+                yield flush()
     if batch:
         yield flush()
 
@@ -174,8 +187,7 @@ def index_source(
                     if not fs.exists(target) and fs.exists(target + ERASED_SUFFIX):
                         log.warning("skipping %s: removed by a right-to-erasure request", entry.path)
                         continue
-                    content = fs.cat_file(target)
-                    for table in records_table(entry, entity, content, pepper, loaded_at):
+                    for table in records_table(entry, entity, lambda t=target: fs.open(t, "rb"), pepper, loaded_at):
                         result.rows[entity.name] = result.rows.get(entity.name, 0) + table.num_rows
                         yield table
                 touched.add(lid)
