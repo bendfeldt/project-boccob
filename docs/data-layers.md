@@ -52,8 +52,9 @@ s3://lakehouse-raw/<source>/_dlt_loads | _dlt_pipeline_state | _dlt_version     
 | `_subject_keys` | JSON map of pseudonymised person identifiers found in the record (see docs/gdpr.md) |
 
 The table lives at `s3://lakehouse-raw/iceberg/<source>/<entity>` and is written by dlt's filesystem
-destination in Iceberg format through the Polaris REST catalog. Indexing is idempotent: a high-water
-mark in dlt state decides what is pending, and rows of a load are deleted before they are written
+destination in Iceberg format through the Polaris REST catalog. Indexing is idempotent: the set of
+indexed load ids in dlt state decides what is pending (a set, so overlapping landings that commit
+out of order lose nothing), and rows of a load are deleted before they are written
 again, so a retried or repeated run never duplicates.
 
 Why dlt is used this way (checked against dlt 1.32):

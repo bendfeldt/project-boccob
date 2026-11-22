@@ -46,7 +46,8 @@ Dagster jobs, schedules (all `STOPPED` unless `SCHEDULES_ENABLED=true`):
 | `retention` | 01:00 | schema migrations, then apply the retention policy |
 | `iceberg_maintenance` | Sunday 05:00 | optimize, expire snapshots, remove orphan files |
 
-All assets and ops that write use the Dagster concurrency pool **`lakehouse_writer`**. The platform
+All assets and ops that write Iceberg tables use the Dagster concurrency pool **`lakehouse_writer`**
+(landing only adds new objects to the raw bucket and runs outside it, so sources land in parallel). The platform
 must limit it to 1 (`dagster instance concurrency set lakehouse_writer 1`, or the equivalent
 instance setting) so that the erasure job, maintenance and the keystore have a single writer.
 

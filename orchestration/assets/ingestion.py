@@ -38,7 +38,7 @@ def build_source_assets(source: SourceSpec) -> list[dg.AssetsDefinition]:
         name=f"land_{source.name}",
         group_name=f"raw_{source.name}",
         partitions_def=daily_partitions,
-        pool=WRITER_POOL,
+        # no writer pool: landing only adds new objects; indexing (Iceberg) stays serialised
         specs=[
             dg.AssetSpec(
                 key=landing_key(source.name, e.name),

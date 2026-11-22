@@ -174,3 +174,13 @@ def test_spec_validation():
 def test_options_can_be_overridden_from_env(monkeypatch):
     monkeypatch.setenv("INGEST_BORGERPORTAL_CITIZENS", "50")
     assert load_source("borgerportal").resolved_options()["citizens"] == 50
+
+
+def test_indexed_load_ids_is_a_set_not_a_high_water_mark():
+    from ingestion.framework.indexing import indexed_load_ids
+
+    loads = {"1.0": [], "2.0": [], "3.0": []}
+    # 3.0 was indexed before 2.0 committed (overlapping landings): 2.0 is still pending
+    assert indexed_load_ids({"indexed_load_ids": ["1.0", "3.0"]}, loads) == {"1.0", "3.0"}
+    old = {"last_indexed_load_id": "2.0"}  # state of the high-water mark version
+    assert indexed_load_ids(old, loads) == {"1.0", "2.0"} and "last_indexed_load_id" not in old

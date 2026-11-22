@@ -14,10 +14,10 @@ One row per source record::
 The table is an Iceberg table written by dlt's filesystem destination (``table_format=iceberg``)
 through the Polaris REST catalog, so Trino sees it as ``raw.<source>.<entity>``.
 
-Idempotency: a per-entity high-water mark of indexed load ids lives in dlt state, which dlt commits
-only when the whole package has loaded. Before rows of a load are written, any rows already present
+Idempotency: the set of indexed load ids per entity lives in dlt state, which dlt commits only
+when the whole package has loaded. Before rows of a load are written, any rows already present
 for that load id are deleted (left-overs of a partially loaded, failed attempt), so retries converge
-instead of duplicating. ``reindex=True`` rewrites the requested load (e.g. after pepper rotation).
+instead of duplicating. ``reindex=True`` rewrites the requested load (dev only).
 """
 
 from __future__ import annotations
@@ -116,6 +116,16 @@ def records_table(
         yield flush()
 
 
+def indexed_load_ids(state: dict, loads: dict) -> set[str]:
+    """Load ids already indexed for one entity. A set, not a high-water mark: landings may overlap
+    and commit out of load id order, and a lower id committed later must still be indexed."""
+    indexed = set(state.get("indexed_load_ids") or [])
+    if "last_indexed_load_id" in state:  # state written by the high-water mark version
+        high_water = float(state.pop("last_indexed_load_id"))
+        indexed |= {lid for lid in loads if float(lid) <= high_water}
+    return indexed
+
+
 def index_source(
     source: SourceSpec,
     *,
@@ -152,9 +162,9 @@ def index_source(
         @dlt.resource(name=entity.name, write_disposition="append", table_format="iceberg")
         def entity_records():
             state = dlt.current.resource_state()
-            high_water = float(state.get("last_indexed_load_id", "0"))
+            indexed = indexed_load_ids(state, loads)
             for lid, entries in loads.items():
-                if not reindex and float(lid) <= high_water:
+                if not reindex and lid in indexed:
                     continue
                 mine = [e for e in entries if e.entity == entity.name]
                 if mine:
@@ -169,9 +179,10 @@ def index_source(
                         result.rows[entity.name] = result.rows.get(entity.name, 0) + table.num_rows
                         yield table
                 touched.add(lid)
-                if float(lid) > high_water:
-                    high_water = float(lid)
-                    state["last_indexed_load_id"] = lid
+                indexed.add(lid)
+            if load_id is None:  # loads whose manifest passed retention can never come back
+                indexed &= set(loads)
+            state["indexed_load_ids"] = sorted(indexed, key=float)
 
         return iceberg_adapter(entity_records, partition=[iceberg_partition.day("_loaded_at")])
 
