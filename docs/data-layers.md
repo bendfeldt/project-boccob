@@ -92,9 +92,6 @@ what makes SCD2 dimensions rebuildable.
 `transform/models/consolidated/<domain>/`. `consolidated.party.person` presents the person entity in
 business vocabulary, independent of the delivering system; further source systems are added as
 `UNION ALL` branches (the pseudonymised key is identical for the same CPR number in every source).
-With one source it is a view (`security invoker`) over `clean.borgerportal.citizens`: no further copy
-of personal data to erase, retain or purge. Materialize it when a second source makes the union
-expensive.
 
 The layer is optional per data flow:
 

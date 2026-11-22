@@ -216,7 +216,13 @@
     },
     "consolidated.party.person": {
       "columns": {
+        "_invocation_id": {
+          "pii": "none"
+        },
         "_source_loaded_at": {
+          "pii": "none"
+        },
+        "_transformed_at": {
           "pii": "none"
         },
         "address_line": {

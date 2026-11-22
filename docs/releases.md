@@ -13,10 +13,10 @@ would disappear while the keystore and the facts still refer to their keys.
 
 | Materialization | Tables | Shape change |
 |---|---|---|
-| `incremental` | `clean.borgerportal.{citizens,cases,payments}`, `curated.borgerservice.fact_payment` | additive: automatic; anything else: migration |
+| `incremental` | `clean.borgerportal.{citizens,cases,payments}`, `consolidated.party.person`, `curated.borgerservice.fact_payment` | additive: automatic; anything else: migration |
 | keystore (macros) | `curated.keystore.*` | migration |
 | governance (python) | `raw.governance.erasure_requests` | evolves itself (pyiceberg `union_by_name`, nullable columns) |
-| `table`, `dimension`, `view` | `clean.borgerportal.case_types`, `consolidated.party.person` (view), `curated.borgerservice.dim_*`, `dp_*` | rebuilt from their sources on every run - nothing to do (keys come from the keystore) |
+| `table`, `dimension` | `clean.borgerportal.case_types`, `curated.borgerservice.dim_*`, `dp_*` | rebuilt from their sources on every run - nothing to do (keys come from the keystore) |
 
 ## The three mechanisms
 

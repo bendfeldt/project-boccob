@@ -434,8 +434,7 @@ def test_real_project_deregistration_plan():
     tables = cm.tables_from_manifest(cm.load_manifest(path))
     steps = {s.table: s.action for s in build_plan(REQ, tables, [], scope="deregistration").steps}
     assert steps["clean.borgerportal.cases"] == steps["clean.borgerportal.payments"] == "retain_anonymised"
-    assert steps["clean.borgerportal.citizens"] == "delete"
-    assert "consolidated.party.person" not in steps, "a view: erased through clean.borgerportal.citizens"
+    assert steps["clean.borgerportal.citizens"] == steps["consolidated.party.person"] == "delete"
 
 
 def test_retention_dry_run_never_creates_the_queue(monkeypatch):

@@ -53,7 +53,7 @@ late, and some payments arrive before the citizen's master data. All data is syn
 |---|---|
 | raw | `s3://lakehouse-raw/borgerportal/<entity>/load_date=.../<load_id>/...` and `raw.borgerportal.{citizens,cases,payments,case_types}` |
 | clean | `clean.borgerportal.{citizens,cases,payments,case_types}` |
-| consolidated | `consolidated.party.person` (view) |
+| consolidated | `consolidated.party.person` |
 | curated | `curated.borgerservice.{dim_citizen,dim_case_type,dim_date,fact_payment,dp_payment_summary_v1}`, `curated.keystore.*`, `curated.audit.*` |
 
 Read more:
