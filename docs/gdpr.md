@@ -128,7 +128,7 @@ its own time rule (`retention_days` + `retention_column`) differently from an ar
 | Table kind | Art. 17 request (`scope = 'full'`) | Deregistration (`scope = 'deregistration'`) |
 |---|---|---|
 | raw index rows, native raw files | deleted | deleted |
-| master data without time rule (`clean.citizens`, `consolidated.person`) | deleted | deleted |
+| master data without time rule (`clean.citizens`; the view `consolidated.party.person` follows it) | deleted | deleted |
 | `erasure: delete` with own retention (`clean.payments`, `clean.cases`) | deleted | rows already past their retention are deleted; the others stay with the person key (`citizen_id`) and `anonymise_columns` (payments: `case_id`) set to NULL and `_anonymised_at` set |
 | facts (`erasure: anonymise`) | kept, pointing at the erased member | same |
 | dimensions + keystore | erased member | same |

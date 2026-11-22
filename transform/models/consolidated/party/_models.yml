@@ -3,12 +3,14 @@ version: 2
 models:
   - name: person
     description: >
-      Business entity Person (consolidated layer). Change history of every person known to the
-      municipality, in business vocabulary and independent of the delivering source system.
+      Business entity Person (consolidated layer, a view over clean). Change history of every
+      person known to the municipality, in business vocabulary and independent of the delivering
+      source system.
     config:
       meta:
         owner: team-data-governance
-        gdpr: {subject_column: person_id, erasure: delete}
+        # a view: erasure and retention act on the clean tables it reads
+        gdpr: {subject_column: person_id, erasure: none}
     data_tests:
       - unique_combination:
           arguments: {columns: [person_id, valid_from]}
@@ -59,10 +61,4 @@ models:
         data_tests: [not_null]
       - name: _source_loaded_at
         description: Load time of the underlying clean row
-        config: {meta: {pii: none}}
-      - name: _invocation_id
-        description: dbt invocation that wrote the row
-        config: {meta: {pii: none}}
-      - name: _transformed_at
-        description: Time the row was written
         config: {meta: {pii: none}}
