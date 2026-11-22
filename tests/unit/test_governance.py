@@ -432,3 +432,27 @@ def test_real_project_deregistration_plan():
     steps = {s.table: s.action for s in build_plan(REQ, tables, [], scope="deregistration").steps}
     assert steps["clean.borgerportal.cases"] == steps["clean.borgerportal.payments"] == "retain_anonymised"
     assert steps["clean.borgerportal.citizens"] == steps["consolidated.party.person"] == "delete"
+
+
+def test_retention_dry_run_never_creates_the_queue(monkeypatch):
+    from governance.erasure import queue
+    from governance.retention.runner import queue_deregistered
+
+    monkeypatch.setattr(queue, "ensure_queue", lambda *a, **k: pytest.fail("a dry run must not write"))
+    plan = plan_retention(cm.tables_from_manifest(GOOD), [], load_retention(), date(2030, 1, 1))
+    assert plan.deregistrations, "GOOD declares a deregistration rule"
+
+    class ReadOnly:
+        def __init__(self):
+            self.sql: list[str] = []
+
+        def table_exists(self, *parts):
+            return False  # no queue yet
+
+        def scalar(self, sql, params=None):
+            self.sql.append(sql)
+            return 0
+
+    trino = ReadOnly()
+    assert queue_deregistered(trino, plan, dry_run=True)[0]["queued_for_erasure"] == 0
+    assert trino.sql and not any("erasure_requests" in s for s in trino.sql)

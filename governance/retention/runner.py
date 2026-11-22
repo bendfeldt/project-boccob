@@ -40,18 +40,19 @@ class Deregistration:
     """Subjects whose latest state in ``table`` is deregistered since before ``cutoff``."""
 
     table: str
-    select_sql: str  # yields subject keys due for erasure; contains no key literal
+    select_sql: str  # yields subject keys due for erasure and not queued yet; contains no key literal
     reason: str
+    unqueued_sql: str = ""  # the same without the queue filter (dry run before the queue exists)
 
 
-def deregistration_select(t: cm.TableClass, rule: dict, cutoff: date, queue_sql: str) -> str:
+def deregistration_select(t: cm.TableClass, rule: dict, cutoff: date, queue_sql: str | None) -> str:
     subject, flag, since = (ident(t.gdpr["subject_column"]), ident(rule["flag_column"]), ident(rule["since_column"]))
-    return (
+    sql = (
         f"select s.subject from (select {subject} as subject, max_by({flag}, {since}) as flag, "
         f"max({since}) as since from {fqn(t.catalog, t.schema, t.table)} group by 1) s "
-        f"where s.flag and s.since < timestamp '{cutoff.isoformat()} 00:00:00 UTC' "
-        f"and s.subject not in (select subject_key from {queue_sql})"
+        f"where s.flag and s.since < timestamp '{cutoff.isoformat()} 00:00:00 UTC'"
     )
+    return sql + (f" and s.subject not in (select subject_key from {queue_sql})" if queue_sql else "")
 
 
 def plan_retention(
@@ -94,6 +95,7 @@ def plan_retention(
                     table=t.key,
                     select_sql=deregistration_select(t, rule, cutoff, queue_table_sql()),
                     reason=f"deregistered for more than {rule['grace_days']} days ({t.key})",
+                    unqueued_sql=deregistration_select(t, rule, cutoff, None),
                 )
             )
             continue
@@ -136,15 +138,18 @@ def expired_landing_objects(
 def queue_deregistered(trino: TrinoClient, plan: RetentionPlan, *, dry_run: bool = False) -> list[dict[str, Any]]:
     """Insert the keys of subjects due for erasure into the erasure queue (INSERT ... SELECT:
     the keys never appear in SQL text). Returns the count per table."""
-    from governance.erasure.queue import ensure_queue, queue_table_sql
+    from governance.erasure.queue import QUEUE_NAMESPACE, QUEUE_TABLE, ensure_queue, queue_table_sql
 
     if not plan.deregistrations:
         return []
-    ensure_queue()
+    if dry_run:  # read-only: never create the queue
+        queued = trino.table_exists(catalog_of("raw"), QUEUE_NAMESPACE, QUEUE_TABLE)
+    else:
+        ensure_queue()
     counts = []
     for d in plan.deregistrations:
         if dry_run:
-            count = trino.scalar(f"select count(*) from ({d.select_sql})")
+            count = trino.scalar(f"select count(*) from ({d.select_sql if queued else d.unqueued_sql})")
         else:
             # scope 'deregistration': identifiers go now, bookkeeping rows stay anonymised (docs/gdpr.md)
             result = trino.execute(
