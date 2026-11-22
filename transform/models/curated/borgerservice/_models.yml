@@ -252,7 +252,7 @@ models:
         data_type: bigint
         config: {meta: {pii: none}}
       - name: citizen_count
-        description: Number of distinct citizens
+        description: Number of distinct persons (person_id; not dimension versions)
         data_type: bigint
         config: {meta: {pii: none}}
       - name: total_amount
@@ -277,3 +277,30 @@ exposures:
       email: oekonomi-data@kommune.example
     config:
       meta: {consumers: [finance, open-data-portal], contains_pii: false}
+
+unit_tests:
+  - name: small_cell_counts_people_not_dimension_versions
+    description: >
+      Person A changed address within the month and has two dimension versions (two citizen keys);
+      with person B that is two people, not three - the cell stays small.
+    model: dp_payment_summary
+    given:
+      - input: ref('fact_payment')
+        rows:
+          - {payment_id: P-1, citizen_key: 1, case_type_key: 1, payment_date_key: 20261103, amount: 100}
+          - {payment_id: P-2, citizen_key: 2, case_type_key: 1, payment_date_key: 20261103, amount: 100}
+          - {payment_id: P-3, citizen_key: 3, case_type_key: 1, payment_date_key: 20261103, amount: 100}
+      - input: ref('dim_date')
+        rows:
+          - {date_key: 20261103, year_month: "2026-11"}
+      - input: ref('dim_citizen')
+        rows:
+          - {citizen_key: 1, person_id: person-a, municipality_code: "101"}
+          - {citizen_key: 2, person_id: person-a, municipality_code: "101"}
+          - {citizen_key: 3, person_id: person-b, municipality_code: "101"}
+      - input: ref('dim_case_type')
+        rows:
+          - {case_type_key: 1, case_type_code: KT, case_type_name: Kontanthjælp}
+    expect:
+      rows:
+        - {year_month: "2026-11", municipality_code: "101", case_type_code: KT, payment_count: 3, citizen_count: 2, is_small_cell: true}

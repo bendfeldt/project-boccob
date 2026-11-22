@@ -6,9 +6,10 @@ select
   ct.case_type_code,
   ct.case_type_name,
   count(*) as payment_count,
-  count(distinct f.citizen_key) as citizen_count,
+  -- people, not dimension versions: an SCD2 citizen has one key per version
+  count(distinct ci.person_id) as citizen_count,
   cast(sum(f.amount) as decimal(38, 2)) as total_amount,
-  count(distinct f.citizen_key) < {{ var('small_cell_threshold') }} as is_small_cell
+  count(distinct ci.person_id) < {{ var('small_cell_threshold') }} as is_small_cell
 from {{ ref('fact_payment') }} f
 join {{ ref('dim_date') }} d on d.date_key = f.payment_date_key
 join {{ ref('dim_citizen') }} ci on ci.citizen_key = f.citizen_key
