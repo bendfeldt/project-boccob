@@ -57,8 +57,8 @@
   {{ return(ks) }}
 {% endmacro %}
 
-{# Collisions caused by one allocation attempt: keys or (business key, version) pairs that the
-   rows of this attempt share with rows written by anybody else. #}
+{# Collisions caused by one allocation: keys or (business key, version) pairs that its rows share
+   with rows written by anybody else. #}
 {% macro keystore_collisions(ks, allocation_id) %}
   {% set q %}
     select
@@ -73,29 +73,20 @@
   {{ return(run_query(q).columns[0].values()[0] | int) }}
 {% endmacro %}
 
-{# Neither Trino nor dbt's Jinja can sleep. A throw-away query of random size spreads colliding
-   writers apart before they retry (randomised backoff). #}
-{% macro keystore_backoff(attempt) %}
-  {# roughly 0.25 s per unit on a small cluster: up to ~1 s after the first collision, ~5 s after the fifth #}
-  {% set units = range(1, 4 * attempt + 1) | random %}
-  {% do run_query("select count(*) from unnest(sequence(1, 10000)) a (x) cross join unnest(sequence(1, 1000)) b (y) "
-                  ~ "cross join unnest(sequence(1, " ~ units ~ ")) c (z) where (x + y) % 7 = z") %}
-{% endmacro %}
-
 {#
   Allocate keys for candidates that have none.
 
   candidates_sql: query returning (business_key varchar, version_key varchar), any number of rows.
   member_type:    'regular' (dimension load) or 'inferred' (fact load found an unknown member).
 
-  Optimistic, verified allocation: one INSERT computes max(surrogate_key) + row_number() for the
-  missing candidates (a single atomic Iceberg commit). Afterwards the attempt is verified; if a
-  concurrent writer produced a collision the rows of *this* attempt are removed and the allocation
-  is retried after a random backoff. Keys that existed before the attempt are never touched.
+  One INSERT computes max(surrogate_key) + row_number() for the missing candidates (a single
+  atomic Iceberg commit). The single writer per keystore is the Dagster pool lakehouse_writer;
+  the allocation is verified afterwards: if a concurrent writer (an operator mistake) produced a
+  collision, the rows of *this* allocation are removed and the model fails. Keys that existed
+  before are never touched.
 #}
 {% macro keystore_allocate(dimension, candidates_sql, member_type='regular') %}
   {% set ks = keystore_ensure(dimension) %}
-  {% set max_attempts = var('keystore_max_attempts') | int %}
 
   {% if member_type == 'regular' %}
     {# real master data arrived for inferred members: they keep their key (earliest version adopts it) #}
@@ -113,43 +104,36 @@
     {% endcall %}
   {% endif %}
 
-  {% set ns = namespace(done=false, allocated=0) %}
-  {% for attempt in range(1, max_attempts + 1) if not ns.done %}
-    {% set allocation_id = invocation_id ~ ':' ~ dimension ~ ':' ~ member_type ~ ':' ~ attempt %}
-    {% call statement('keystore_insert', fetch_result=true) %}
-      insert into {{ ks }}
-      select
-        cast((select greatest(coalesce(max(surrogate_key), 0), 0) from {{ ks }})
-             + row_number() over (order by c.business_key, c.version_key) as {{ var('keystore_key_type') }}),
-        c.business_key,
-        c.version_key,
-        '{{ member_type }}',
-        current_timestamp,
-        '{{ allocation_id }}',
-        null, null, null
-      from (select distinct business_key, version_key from ({{ candidates_sql }}) where business_key is not null) c
-      where not exists (
-        select 1 from {{ ks }} k
-        where k.business_key = c.business_key
-          {% if member_type == 'inferred' %}
-          {# any existing key of the member makes inference unnecessary #}
-          {% else %}
-          and k.version_key = c.version_key
-          {% endif %}
-      )
+  {# unique per allocation, also when two models of one invocation allocate for the same dimension #}
+  {% set allocation_id = invocation_id ~ ':' ~ dimension ~ ':' ~ member_type ~ ':' ~ modules.datetime.datetime.now().strftime('%H%M%S%f') %}
+  {% call statement('keystore_insert', fetch_result=true) %}
+    insert into {{ ks }}
+    select
+      cast((select greatest(coalesce(max(surrogate_key), 0), 0) from {{ ks }})
+           + row_number() over (order by c.business_key, c.version_key) as {{ var('keystore_key_type') }}),
+      c.business_key,
+      c.version_key,
+      '{{ member_type }}',
+      current_timestamp,
+      '{{ allocation_id }}',
+      null, null, null
+    from (select distinct business_key, version_key from ({{ candidates_sql }}) where business_key is not null) c
+    where not exists (
+      select 1 from {{ ks }} k
+      where k.business_key = c.business_key
+        {% if member_type == 'inferred' %}
+        {# any existing key of the member makes inference unnecessary #}
+        {% else %}
+        and k.version_key = c.version_key
+        {% endif %}
+    )
+  {% endcall %}
+  {% if keystore_collisions(ks, allocation_id) != 0 %}
+    {% call statement('keystore_withdraw') %}
+      delete from {{ ks }} where key_created_by = '{{ allocation_id }}'
     {% endcall %}
-    {% if keystore_collisions(ks, allocation_id) == 0 %}
-      {% set ns.done = true %}
-    {% else %}
-      {{ log("keystore " ~ ks ~ ": collision detected on attempt " ~ attempt ~ ", withdrawing own allocation", info=true) }}
-      {% call statement('keystore_rollback') %}
-        delete from {{ ks }} where key_created_by = '{{ allocation_id }}'
-      {% endcall %}
-      {% do keystore_backoff(attempt) %}
-    {% endif %}
-  {% endfor %}
-  {% if not ns.done %}
-    {{ exceptions.raise_compiler_error("keystore " ~ ks ~ ": could not allocate keys without collision after " ~ max_attempts ~ " attempts") }}
+    {{ exceptions.raise_compiler_error("keystore " ~ ks ~ ": a concurrent writer allocated keys at the same time; "
+        ~ "this allocation was withdrawn. Keystore writers must run in the lakehouse_writer pool - re-run the model.") }}
   {% endif %}
   {{ return(ks) }}
 {% endmacro %}

@@ -17,7 +17,7 @@ One Iceberg table per dimension, `curated.keystore.<dimension model name>`:
 | `business_key` | business key as text (pseudonymised when it identifies a person) |
 | `version_key` | SCD2: effective-from of the version as UTC text; SCD1: empty string |
 | `member_type` | `regular`, `inferred`, `unknown`, `erased` |
-| `key_created_at`, `key_created_by` | when the key was allocated and by which dbt invocation/attempt |
+| `key_created_at`, `key_created_by` | when the key was allocated and by which dbt invocation |
 | `key_last_used_in_fact_at`, `key_last_used_by` | last fact load that referenced the key, and which fact |
 | `adopted_at` | when an inferred member received its master data |
 
@@ -89,40 +89,27 @@ from batch p
 Trino on Iceberg has no sequences and no locks, and Iceberg does not detect conflicts between
 concurrent appends. Measured on the harness (Trino 484, Polaris 1.9.0): two simultaneous
 `INSERT ... SELECT max(key) + row_number()` statements both commit and produce duplicate keys every
-time. Allocation is therefore **optimistic and verified**:
+time. Keys are therefore allocated by a **single writer, verified**:
 
 1. One `INSERT ... SELECT max(surrogate_key) + row_number()` adds all missing candidates. It is a
    single atomic Iceberg commit: readers see either none or all of the new keys.
-2. Immediately afterwards the attempt is verified: do rows written by this attempt (identified by
-   `key_created_by = <invocation>:<dimension>:<type>:<attempt>`) share a surrogate key or a
-   (business key, version) pair with rows written by anybody else?
-3. If so, the rows of this attempt are deleted and the allocation is retried after a random backoff,
-   up to `keystore_max_attempts` (5). Keys that existed before the attempt are never touched. If all
-   attempts collide the model fails; nothing was built on the withdrawn keys because the dimension
-   is only rebuilt after a clean allocation.
+2. The single writer per keystore table is the design: one dbt model owns each dimension, a fact's
+   pre-hook is the only other writer, dbt orders them through `ref`, and all Dagster assets/ops
+   that write use the pool `lakehouse_writer` (limit 1, see docs/platform-contract.md).
+3. Immediately afterwards the allocation is verified: do its rows (identified by
+   `key_created_by = <invocation>:<dimension>:<type>:<time>`) share a surrogate key or a
+   (business key, version) pair with rows written by anybody else? That only happens when an
+   operator runs a second writer at the same time. Then the rows of this allocation are deleted
+   and the model **fails** (re-run it); keys that existed before are never touched, and nothing was
+   built on the withdrawn keys because the dimension is only rebuilt after a clean allocation.
 4. When two sessions create a keystore at the same moment both insert the unknown member; a
    deterministic rule (keep the row with the smallest `key_created_by`) leaves exactly one.
 
-Neither Trino nor dbt's Jinja can sleep, so the backoff is a throw-away query of random size
-(roughly 0.25-1 s after the first collision, up to about 5 s after the fifth).
-
 Limits, stated plainly:
 
-* This is detection and compensation, not mutual exclusion. Between the insert and the withdrawal of
-  a colliding attempt (well under a second on the harness) a duplicate key is visible to anyone
-  reading the keystore table. Dimension tables of the same run are never built from that state; an
-  independent reader of the keystore, or a concurrently running dimension/fact build of the same
-  dimension, could be.
-* The primary safeguard is therefore a **single writer per keystore table**: one dbt model owns each
-  dimension, a fact's pre-hook is the only other writer, dbt orders them through `ref`, and all
-  Dagster assets/ops that write use the pool `lakehouse_writer` (limit 1, see
-  docs/platform-contract.md). Verification and retry are the safety net for operator mistakes such
-  as two manual runs at once.
-* Tested: three dbt processes allocating 300 keys each at the same moment, repeatedly. Collisions
-  occurred in every round and were resolved; the result had no duplicates and no gaps. Before the
-  backoff was added all writers collided in lockstep and failed (safely, with an empty result),
-  which is the failure mode to expect if many more writers than attempts compete.
-* Collision detection is scoped to the attempt. A keystore that is already inconsistent for another
+* This is detection, not mutual exclusion. Between the insert and the withdrawal of a colliding
+  allocation (well under a second) a duplicate key is visible to anyone reading the keystore table.
+* Collision detection is scoped to the allocation. A keystore that is already inconsistent for another
   reason does not block allocation; the `keystore_integrity` test reports it.
 * Keys are sequential without gaps; an erased member keeps its number forever.
 * Changing a dimension from SCD2 to SCD1 (or back) changes the version key, so new keys are
@@ -147,5 +134,4 @@ are identical after a changed load, after dropping both dimension tables and aft
 is refused, see releases.md); facts resolve to the same keys after the full refresh; keys, SCD2
 versions and the clean history survive a release upgrade with schema migrations;
 only keys referenced by the newest fact load get a new last-used timestamp; inferred members keep
-their key when adopted; keys are sequential without gaps; erased keys are never reassigned;
-concurrent allocation by three processes leaves no duplicates.
+their key when adopted; keys are sequential without gaps; erased keys are never reassigned.
