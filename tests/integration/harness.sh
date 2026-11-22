@@ -76,6 +76,7 @@ up() {
     -p "127.0.0.1:${RUSTFS_PORT}:9000" \
     -e RUSTFS_ACCESS_KEY="$S3_ACCESS_KEY_ID" -e RUSTFS_SECRET_KEY="$S3_SECRET_ACCESS_KEY" \
     -e RUSTFS_ADDRESS=":9000" -e RUSTFS_CONSOLE_ENABLE=false \
+    -e RUSTFS_REGION="$S3_REGION" \
     "$RUSTFS_IMAGE" >/dev/null
   wait_http "http://localhost:${RUSTFS_PORT}/health" || wait_http "http://localhost:${RUSTFS_PORT}/minio/health/live" 5
 
