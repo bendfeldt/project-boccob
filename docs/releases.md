@@ -41,8 +41,7 @@ would disappear while the keystore and the facts still refer to their keys.
    * no key-like or CPR-shaped literal (query text is archived WORM; the runner refuses such files);
    * never change a statement or directive of a released migration: the runner compares checksums
      and stops. The checksum covers the normalised SQL (comments and whitespace removed,
-     placeholders unresolved) plus the directives, so fixing a comment is fine. Lakes migrated
-     before this normalisation recorded the checksum of the raw file; that one is still accepted.
+     placeholders unresolved) plus the directives, so fixing a comment is fine.
 
    Applied migrations are recorded in `curated.audit.schema_migrations` (version, name, checksum,
    statement count, time, principal, duration). The schema `curated.audit` is protected: only the
@@ -68,16 +67,14 @@ The Dagster asset `curated/audit/schema_migrations` (pool `lakehouse_writer`) ap
 migrations. Every dbt model without an upstream model depends on it, so in `transform` the migrations always run before the first model of a release. The job `migrate` runs
 them alone. The `erasure` and `retention` jobs run them as their first step as well, because their
 SQL is derived from the release's model metadata and may already refer to a new column.
-Every runner takes an advisory lock row in `curated.audit.schema_migration_lock` (protected schema;
-the oldest live row wins, abandoned rows expire after `MIGRATION_LOCK_TTL_HOURS`, default 6), so the
-Dagster asset, the ops and the CLI never apply migrations concurrently; when nothing is pending no
-lock is taken.
+All of them run in the `lakehouse_writer` pool (limit 1), so migrations never run concurrently
+with each other or with another writer.
 
-By hand: `make migrate-status` (read-only), `lakehouse-migrate --check` (exit 3 when pending) and
-`make migrate` (`lakehouse-migrate`). The CLI is not serialised with the other Dagster writers, so
-outside dev it applies only with `--outside-dagster` (schedules paused, no run active); prefer the
-Dagster job. `make dbt-build` runs the migrations first in dev and refuses to build elsewhere
-while migrations are pending.
+By hand: `make migrate-status` (read-only), `lakehouse-migrate --check` (exit 3 when pending) and,
+in dev only, `make migrate` (`lakehouse-migrate`). Outside dev the CLI refuses to apply: it is not
+serialised with the Dagster writers, and `@purge-history` uses a zero retention window - use the
+Dagster job `migrate`. `make dbt-build` runs the migrations first in dev and refuses to build
+elsewhere while migrations are pending.
 
 ## Release procedure
 

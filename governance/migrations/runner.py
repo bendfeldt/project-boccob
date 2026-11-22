@@ -1,4 +1,4 @@
-"""Versioned schema migrations for the lakehouse tables (audit N-5).
+"""Versioned schema migrations for the lakehouse tables.
 
 dbt handles additive changes of incremental models itself (``on_schema_change='append_new_columns'``).
 Every other change of a table that holds history - dropping, renaming or retyping a column,
@@ -36,9 +36,6 @@ import logging
 import os
 import re
 import time
-import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,7 +48,6 @@ log = logging.getLogger(__name__)
 
 RECORD_SCHEMA = "audit"
 RECORD_TABLE = "schema_migrations"
-LOCK_TABLE = "schema_migration_lock"
 _FILE = re.compile(r"^V(\d{4})__([a-z0-9_]+)\.sql$")
 _DIRECTIVE = re.compile(r"^--\s*@purge-history\s+(\w+)\.(\w+)\.(\w+)\s*$")
 _PLACEHOLDER = re.compile(r"\$\{(\w+)\}")
@@ -62,10 +58,6 @@ class MigrationError(RuntimeError):
     pass
 
 
-class MigrationLockError(MigrationError):
-    """Another process is applying migrations."""
-
-
 @dataclass(frozen=True)
 class Migration:
     version: str  # "0001"
@@ -74,7 +66,6 @@ class Migration:
     checksum: str  # of the normalised SQL: comments and whitespace do not count
     statements: tuple[str, ...]
     purge_history: tuple[tuple[str, str, str], ...] = ()  # (layer, schema, table)
-    legacy_checksum: str = ""  # raw file text, as recorded before release 0.2.1
 
     @property
     def label(self) -> str:
@@ -161,7 +152,6 @@ def parse(path: Path) -> Migration:
         name=m.group(2),
         path=path,
         checksum=normalised_checksum(body, purge),
-        legacy_checksum=hashlib.sha256(text.encode()).hexdigest(),
         statements=statements,
         purge_history=tuple(purge),
     )
@@ -210,7 +200,7 @@ def check(migrations: list[Migration], applied: dict[str, tuple[str, str]]) -> l
             "newer release. Deploy that release (or restore the lake) instead of rolling back."
         )
     for version, (name, checksum) in sorted(applied.items()):
-        if checksum not in (known[version].checksum, known[version].legacy_checksum):
+        if checksum != known[version].checksum:
             raise MigrationError(
                 f"V{version}__{name} was changed after it was applied; never edit an applied migration, add a new one"
             )
@@ -299,45 +289,15 @@ def _norm_type(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip().lower()).replace(" (", "(").replace(", ", ",")
 
 
-def lock_table() -> str:
-    return fqn(catalog_of("curated"), RECORD_SCHEMA, LOCK_TABLE)
-
-
-@contextmanager
-def migration_lock(trino: TrinoClient, holder: str) -> Iterator[None]:
-    """Advisory lock in the protected ``curated.audit`` schema, shared by the Dagster asset/ops and
-    the CLI: the oldest live lock row wins, every other contender withdraws its row and fails.
-    Rows older than ``MIGRATION_LOCK_TTL_HOURS`` (default 6) count as abandoned and are removed."""
-    ttl = int(os.environ.get("MIGRATION_LOCK_TTL_HOURS", "6"))
-    table = lock_table()
-    trino.execute(
-        f"create table if not exists {table} (token varchar, holder varchar, acquired_at timestamp(6) with time zone)"
-        " comment 'Advisory lock of the schema migration runner'"
-    )
-    trino.execute(f"delete from {table} where acquired_at < current_timestamp - interval '{ttl}' hour")
-    token = str(uuid.uuid4())
-    trino.execute(f"insert into {table} values (?, ?, current_timestamp)", [token, holder[:200]])
-    rows = trino.execute(f"select token, holder, acquired_at from {table} order by acquired_at, token")
-    if not rows or rows[0][0] != token:
-        trino.execute(f"delete from {table} where token = ?", [token])
-        owner = rows[0] if rows else ("?", "unknown", "?")
-        raise MigrationLockError(f"migrations are being applied by {owner[1]} (since {owner[2]}); try again later")
-    try:
-        yield
-    finally:
-        trino.execute(f"delete from {table} where token = ?", [token])
-
-
 def run_migrations(
     *,
     dry_run: bool = False,
     directory: Path | None = None,
     trino: TrinoClient | None = None,
     check_drift: bool = True,
-    holder: str = "dagster",
 ) -> MigrationReport:
-    """Apply every pending migration in version order (Dagster asset/op ``migrate``, writer pool;
-    the CLI takes the same lock)."""
+    """Apply every pending migration in version order. Writers are serialised by the Dagster pool
+    ``lakehouse_writer`` (asset/op ``migrate``); the CLI applies only in dev."""
     migrations = discover(directory)
     trino = trino or TrinoClient(
         session_properties=iceberg.retention_session([catalog_of(layer) for layer in LAYERS], "0s"),
@@ -350,13 +310,10 @@ def run_migrations(
         report.already_applied = [m.label for m in migrations if m.version in applied]
         report.pending = [m.label for m in pending]
         return report
-    if pending:
-        with migration_lock(trino, holder):
-            applied = applied_migrations(trino)  # another holder may have applied them meanwhile
-            for migration in check(migrations, applied):
-                report.purged += apply(trino, migration)
-                report.applied.append(migration.label)
-                log.info("applied %s", migration.label)
+    for migration in pending:
+        report.purged += apply(trino, migration)
+        report.applied.append(migration.label)
+        log.info("applied %s", migration.label)
     report.already_applied = [m.label for m in migrations if m.version in applied]
     if check_drift:
         from governance.classification import manifest as cm

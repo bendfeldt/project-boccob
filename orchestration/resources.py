@@ -36,10 +36,10 @@ class IngestionResource(dg.ConfigurableResource):
 class GovernanceResource(dg.ConfigurableResource):
     """Maintenance, retention and erasure tooling."""
 
-    def migrate(self, dry_run: bool = False, check_drift: bool = True, holder: str = "dagster"):
+    def migrate(self, dry_run: bool = False, check_drift: bool = True):
         from governance.migrations.runner import run_migrations
 
-        return run_migrations(dry_run=dry_run, check_drift=check_drift, holder=holder)
+        return run_migrations(dry_run=dry_run, check_drift=check_drift)
 
     def maintain(self, layers: tuple[str, ...], operations: tuple[str, ...]):
         from governance.maintenance.runner import run_maintenance

@@ -74,7 +74,7 @@ def iceberg_maintenance_op(context: dg.OpExecutionContext, config: MaintenanceCo
 )
 def migrate_op(context: dg.OpExecutionContext, governance: GovernanceResource):
     # no drift check here: an unrelated drift must not block erasure or retention (transform checks it)
-    report = governance.migrate(check_drift=False, holder=f"dagster run {context.run_id}")
+    report = governance.migrate(check_drift=False)
     context.log.info("migrations applied: %s", report.applied)
 
 

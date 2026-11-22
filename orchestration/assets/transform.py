@@ -26,7 +26,7 @@ MIGRATIONS_KEY = dg.AssetKey(["curated", "audit", "schema_migrations"])
     ),
 )
 def schema_migrations(context: dg.AssetExecutionContext, governance: GovernanceResource) -> dg.MaterializeResult:
-    report = governance.migrate(holder=f"dagster run {context.run_id}")
+    report = governance.migrate()
     context.log.info("migrations applied: %s; already applied: %d", report.applied, len(report.already_applied))
     return dg.MaterializeResult(
         metadata={

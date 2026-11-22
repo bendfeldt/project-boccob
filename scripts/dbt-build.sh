@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# dbt build with the release's schema migrations first (audit R3-4).
-#   LAKEHOUSE_ENV=dev   pending migrations are applied (lakehouse-migrate, shared advisory lock)
+# dbt build with the release's schema migrations first.
+#   LAKEHOUSE_ENV=dev   pending migrations are applied (lakehouse-migrate)
 #   otherwise           the build is refused while migrations are pending: apply them with the
 #                       Dagster job `migrate` (writer pool), see docs/releases.md
 # Extra arguments go to `dbt build`.
