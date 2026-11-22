@@ -11,4 +11,6 @@ select
   week(d) as iso_week,
   day_of_week(d) as iso_day_of_week,
   day_of_week(d) in (6, 7) as is_weekend
-from unnest(sequence(date '1990-01-01', date '2099-12-31', interval '1' day)) as t (d)  -- history and future payments
+-- history and future payments; one sequence per year: Trino's sequence() allows at most 10000 entries
+from unnest(sequence(date '1990-01-01', date '2099-01-01', interval '1' year)) as y (year_start)
+cross join unnest(sequence(year_start, date_add('day', -1, date_add('year', 1, year_start)))) as t (d)
