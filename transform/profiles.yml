@@ -3,13 +3,14 @@
 boccob:
   target: "{{ env_var('DBT_TARGET', 'default') }}"
   outputs:
-    default: &base           # no authentication (local harness) - user comes from TRINO_USER
+    default: &base           # no authentication (local harness sets TRINO_HTTP_SCHEME=http) - user from TRINO_USER
       type: trino
       method: none
       host: "{{ env_var('TRINO_HOST') }}"
-      port: "{{ env_var('TRINO_PORT', '8080') | int }}"
+      # same defaults as the python client (lakehouse/settings.py): https on 8443, http on 8080
+      port: "{{ env_var('TRINO_PORT', '8080' if env_var('TRINO_HTTP_SCHEME', 'https') == 'http' else '8443') | int }}"
       user: "{{ env_var('TRINO_USER') }}"
-      http_scheme: "{{ env_var('TRINO_HTTP_SCHEME', 'http') }}"
+      http_scheme: "{{ env_var('TRINO_HTTP_SCHEME', 'https') }}"
       database: "{{ env_var('CURATED_CATALOG', 'curated') }}"
       schema: default
       threads: "{{ env_var('DBT_THREADS', '4') | int }}"

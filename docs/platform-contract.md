@@ -111,7 +111,7 @@ to a mounted file; the dbt profile reads plain variables only.
 | `TRINO_HOST` | | | Trino host (as deployed: `trino.<base_domain>` through Traefik) |
 | `TRINO_PORT` | | `8443` (https) / `8080` (http) | as deployed: `443` |
 | `TRINO_USER` | | | service account, e.g. `svc-dagster` |
-| `TRINO_HTTP_SCHEME` | | `https` (python) | `http` only without authentication |
+| `TRINO_HTTP_SCHEME` | | `https` (python client and dbt) | `http` only without authentication (the local harness) |
 | `DBT_TARGET` | | `default` | dbt authentication profile: `default` (none), `password`, `jwt` |
 | `TRINO_PASSWORD` | yes | | for `DBT_TARGET=password` and the python client |
 | `TRINO_JWT_TOKEN` | yes | | for `DBT_TARGET=jwt` and the python client |
