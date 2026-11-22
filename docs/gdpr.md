@@ -156,82 +156,83 @@ for the demo; the controller sets the real ones.
 ## Right to erasure (GDPR art. 17)
 
 ```
-ERASURE_IDENTIFIER=<cpr> lakehouse-erase --requested-by dpo@... --reason "case 4711" --dry-run
-ERASURE_IDENTIFIER=<cpr> lakehouse-erase --requested-by dpo@... --reason "case 4711" --submit
+lakehouse-erase --dry-run [--scope deregistration]          # tables and actions, no identifier
+ERASURE_IDENTIFIER=<cpr> lakehouse-erase --requested-by dpo@... --reason "case 4711"
 ```
 
-`--submit` queues the request: only the pseudonymised key is stored, in `raw.governance.erasure_requests`
-(written with pyiceberg, readable by auditors and the pipeline only); the Dagster job `erasure` executes
-the queue at night under the writer pool. Without `--submit` the request is queued and executed
-immediately. A dry run (`--dry-run`, `make erase-dry-run`) only reads: it writes no queue row and
-needs no write permission; its queries select the subjects whose key starts with the same two hex
-characters (8 bits, identifies nobody) and the rows are matched in Python. The identifier is read from the
-environment or stdin, never from the command line, and never enters Dagster run configuration or events.
+A request is queued: only the pseudonymised key is stored, in `raw.governance.erasure_requests`
+(written with pyiceberg, readable by auditors and the pipeline only); the Dagster job `erasure`
+executes the queue at night under the writer pool. Outside dev that is the only way: the CLI only
+queues (an erasure outside the writer pool could race a dbt MERGE, whose uncommitted files the
+zero-retention purge would delete). In dev the CLI executes at once unless `--submit`.
+The dry run (`make erase-dry-run`) lists the tables and actions of the same plan the job executes
+(per scope); it needs no identifier, runs no query and writes nothing. The real row counts are in
+the audit row of the executed request. The identifier is read from the environment or stdin, never
+from the command line, and never enters Dagster run configuration or events.
 
 **No identifier in SQL.** Trino query text is archived (WORM) by the platform, so anything in it can
 never be erased. Every erasure statement references the subject only as
 `(select subject_key from raw.governance.erasure_requests where request_id = '<uuid>')`; the key, the
 CPR number and the pepper stay in Python. The integration test checks the query history for this.
+The one 64-hex value in query text is the keyed audit digest (step 6), which identifies nobody
+without the pepper; the platform audit sink redacts 64-hex literals anyway.
 
-What happens, in order (`governance/erasure/plan.py`, derived from dbt meta and the source specs):
+What the nightly job does with the queue, as **one batch** (`governance/erasure/executor.py`; the plan
+is derived from dbt meta and the source specs in `governance/erasure/plan.py`):
 
-1. The identifier is turned into the pseudonymised key and staged in the request queue.
-2. The native raw files containing the subject are located through the raw index; stale dbt work
-   tables (`__dbt_tmp`, `__stage`, `__dbt_backup`, left by failed runs) are dropped.
-3. `raw.<source>.<entity>`: the subject's rows are deleted.
-4. Facts with `erasure: anonymise` keep their rows (e.g. bookkeeping duty) but `anonymise_columns`
-   are set to NULL; they keep pointing at the member's surrogate keys.
-5. clean and consolidated models with `erasure: delete`: the subject's rows are deleted.
-6. Dimensions with `erasure: keystore`: the member's rows are replaced by anonymous placeholders
-   (`is_erased`), and the keystore entries lose the business key (`erased:<key>`, type `erased`).
-   The integer keys remain, are never reused, and carry no information about the person.
-7. The native raw files are deleted including all object versions; a tombstone
-   `<file>.erased.json` (no personal data) explains the gap. Records of other persons from those
-   files remain available in the raw index.
-8. Every touched table is purged (`governance/iceberg.py: purge_history`): `optimize` rewrites data
-   files that carry row-level deletes; `optimize_manifests` rewrites the manifests, because the
-   manifest entry of a removed file keeps that file's column min/max values (which can be the
-   subject's key or CPR number); a table that became empty is replaced by itself for the same
-   reason; `expire_snapshots` and `remove_orphan_files` with zero retention then remove every
-   older data file, delete file and manifest.
-9. Verification in SQL: every planned table is queried again (through the queued key).
-10. Object versions: on a versioned bucket every file deleted in steps 2-9 is still readable by
-    version id. The erasure removes at once every noncurrent version and delete marker **under the
-    locations of the touched tables and of the dropped dbt work tables** (read before the work; an
-    Iceberg table keeps its location) - the native raw files were already removed with all versions
-    in step 7 (`PURGE_S3_*` credentials with `s3:DeleteObjectVersion`; the job fails rather than
-    report success without the permission). Everywhere else the deletion safety window stays intact.
-    Why not the whole lake (as before): the erasure job runs every night, so a lake-wide purge would
-    reduce the safety window for every accidental delete or `DROP TABLE` to less than a day. The
-    price: copies of the subject in noncurrent versions *outside* the touched tables - typically a
-    table that was dropped and re-created at a new location, or a dbt work table dropped by dbt
-    itself - stay readable by version id (only with read access to the bucket, not through the
-    catalog) until the safety window expires them, at most `NONCURRENT_VERSION_GRACE_DAYS` after
-    they became noncurrent. The controller treats them like backups (erasure completes when the
-    window has passed); the `full` storage verification lists them as `deferred_hits` instead of
-    failing.
-11. With `--verify-storage` / `ERASURE_VERIFY_STORAGE` object *versions* are decoded (Parquet, Avro
-    manifests, text) and searched for the identifier and the key: `scoped` covers every version under
-    the touched tables' locations and the subject's raw files, `full` every version of the four
-    buckets (O(lake) per request: audits and small lakes only; noncurrent hits outside the touched
-    tables are reported as `deferred_hits`, see step 10). The files of the request queue are
-    skipped: they still hold the key, by design, until step 13.
-12. An audit row is written to `curated.audit.erasure_log`: erasure id, who requested it, reason,
-    status, executing principal, affected tables and counts, and a keyed digest of the subject
-    (lets the controller later prove that a given identifier was erased; identifies nobody by itself).
-    The insert must report exactly one row; otherwise the erasure counts as failed.
-13. Only now is the request removed from the queue; the queue's history is purged as in step 8 and
-    its noncurrent object versions as in step 10.
+1. Stale dbt work tables (`__dbt_tmp`, `__stage`, `__dbt_backup`, left by failed runs) are dropped.
+2. Per request: the native raw files containing the subject are located through the raw index;
+   then
+   * `raw.<source>.<entity>`: the subject's rows are deleted;
+   * facts with `erasure: anonymise` keep their rows (e.g. bookkeeping duty) but `anonymise_columns`
+     are set to NULL; they keep pointing at the member's surrogate keys;
+   * clean models with `erasure: delete`: the subject's rows are deleted (scope `deregistration`:
+     see the table above);
+   * dimensions with `erasure: keystore`: the member's rows are replaced by anonymous placeholders
+     (`is_erased`), and the keystore entries lose the business key (`erased:<key>`, type `erased`).
+     The integer keys remain, are never reused, and carry no information about the person;
+   * the native raw files are deleted including all object versions; a tombstone
+     `<file>.erased.json` (no personal data) explains the gap. Records of other persons from those
+     files remain available in the raw index.
+3. Once per touched table for the whole batch (`governance/iceberg.py: purge_history`): `optimize`
+   rewrites data files that carry row-level deletes; `optimize_manifests` rewrites the manifests,
+   because the manifest entry of a removed file keeps that file's column min/max values (which can be
+   the subject's key); a table that became empty is replaced by itself for the same reason;
+   `expire_snapshots` and `remove_orphan_files` with zero retention then remove every older data
+   file, delete file and manifest. Tens of requests cost one rewrite per table, not one per request.
+4. Object versions: on a versioned bucket every file deleted in steps 1-3 is still readable by
+   version id. The job removes every noncurrent version and delete marker **under the locations of
+   the touched tables and of the dropped dbt work tables** (`PURGE_S3_*` credentials with
+   `s3:DeleteObjectVersion`; the job fails rather than report success without the permission).
+   Everywhere else the deletion safety window stays intact: the job runs every night, and a
+   lake-wide purge would shrink the window for every accidental delete to less than a day. The
+   price: copies of the subject in noncurrent versions *outside* the touched tables - typically a
+   table that was dropped and re-created at a new location - stay readable by version id (only with
+   read access to the bucket, not through the catalog) until the safety window expires them, at
+   most `NONCURRENT_VERSION_GRACE_DAYS` after they became noncurrent. The controller treats them
+   like backups (erasure completes when the window has passed).
+5. Per request, verification in SQL: every planned table is queried again (through the queued key).
+6. Per request, an audit row in `curated.audit.erasure_log`: erasure id, who requested it, reason,
+   scope, status, executing principal, affected tables and row counts, and a keyed digest of the
+   subject (lets the controller later prove that a given identifier was erased; identifies nobody by
+   itself). The insert must report exactly one row; otherwise the erasure counts as failed.
+7. Only now is the request removed from the queue. Finally the queue's own history and noncurrent
+   object versions are purged as in steps 3-4 (every run, so a failed purge is repeated).
+
+The integration test also scans every object version of the four buckets (Parquet, Avro manifests,
+text) for the CPR number and the key after the erasure (`tests/integration/storage_scan.py`); that
+O(lake) scan is a test, not part of the job.
 
 **Failures never lose a request.** If any step fails, the request stays in the queue with
 `status = 'failed'` and an incremented `attempts`; the key is kept, so the next run retries it
 without the DPO resubmitting the identifier (every step is idempotent). A failed attempt is audited
-as `failed`. The nightly job processes every queued request even when one fails, and then fails
-itself, listing the failed request ids (no identifiers) - this is the operator's alert.
+as `failed`. A failing purge (step 3-4) fails every request of the batch. The nightly job processes
+every queued request even when one fails, and then fails itself, listing the failed request ids (no
+identifiers) - this is the operator's alert.
 
 Limits and operating rules:
 
-* Run exclusively. Steps 8-10 use a zero retention window; a concurrent writer could lose uncommitted
+* Run exclusively. Steps 3-4 use a zero retention window; a concurrent writer could lose uncommitted
   files. The Dagster pool `lakehouse_writer` (limit 1) guarantees this for scheduled work.
 * Time travel is lost for the touched tables (that is the point).
 * Deleting whole native files removes the raw copy of other persons' records in the same files

@@ -7,11 +7,11 @@ from governance.classification import manifest as cm
 from governance.config import load_retention
 from governance.erasure.executor import audit_digest
 from governance.erasure.plan import ErasurePlanError, build_plan, validate_subject_key
-from governance.erasure.storage_scan import object_contains
 from governance.iceberg import retention_session
 from governance.retention.runner import expired_landing_objects, plan_retention
 from ingestion.framework.spec import load_source
 from lakehouse.trino_client import fqn, ident
+from tests.integration.storage_scan import object_contains
 
 KEY = "ab" * 32
 REQ = "0b6f1c2e-6a4d-4c51-9b7e-2f3a4b5c6d7e"

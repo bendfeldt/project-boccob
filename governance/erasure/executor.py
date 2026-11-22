@@ -1,34 +1,32 @@
 """Right to erasure - execution, physical purge, verification and audit record.
 
-Sequence (one queued request; see queue.py for why the key is staged in a table)
-1. the subject key is staged in the request queue (pyiceberg); SQL references it only through
-   the opaque request id - no key, CPR number or pseudonym ever appears in Trino query text
-2. collect the native raw files that contain the subject (from the raw index)
-3. drop stale dbt work tables (``__dbt_tmp`` / ``__stage``) that may hold copies of the subject
-4. run the metadata derived plan: raw index rows, facts, clean/consolidated rows, dimensions+keystore
-5. remove the native raw files (all object versions) and leave a tombstone without personal data
-6. purge Iceberg history of every touched table (governance.iceberg.purge_history)
-7. verify in SQL
-8. remove every noncurrent object version and delete marker under the locations of the touched
-   tables and dropped work tables: on a versioned bucket the files deleted in steps 3-7 are otherwise
-   still readable by version id. The rest of the lake keeps its deletion safety window
-   (NONCURRENT_VERSION_GRACE_DAYS / bucket lifecycle), which expires other noncurrent copies
-9. optionally scan every object version of the lakehouse buckets for the subject (the queue's
-   own files are skipped: they hold the key until step 11)
-10. write the audit row (exactly one row, or the request counts as failed)
-11. only now remove the request from the queue, purge the queue's history and its noncurrent
-    object versions
+The nightly job executes every queued request in one batch (:func:`process_pending_requests`):
+
+1. drop stale dbt work tables (``__dbt_tmp`` / ``__stage`` / ``__dbt_backup``): copies of model
+   data that the plan cannot see
+2. per request: the metadata derived plan (raw index rows, facts, clean/consolidated rows,
+   dimensions + keystore, keystore baselines); the subject's native raw files are removed with all
+   object versions and replaced by a tombstone without personal data. SQL references the subject
+   only through the opaque request id - no key, CPR number or pseudonym is ever in Trino query text
+3. once per touched table, for the whole batch: purge the Iceberg history
+   (governance.iceberg.purge_history), then every noncurrent object version under the table's
+   location (on a versioned bucket the files deleted above are still readable by version id).
+   N requests therefore cost one rewrite per table, not N. The rest of the lake keeps its deletion
+   safety window (NONCURRENT_VERSION_GRACE_DAYS / bucket lifecycle)
+4. per request: verify in SQL, write the audit row (exactly one), then remove the request from
+   the queue
+5. purge the queue's own history and noncurrent versions (they held the keys)
 
 A request that fails at any step stays in the queue with ``status = 'failed'`` (the key is kept,
-so the next run retries it without the DPO resubmitting the identifier); the batch continues
-with the next request and fails at the end (:class:`ErasureBatchError`).
+so the next run retries it without the DPO resubmitting the identifier); the other requests are
+still processed and the batch fails at the end (:class:`ErasureBatchError`).
 
-The job must run exclusively (no concurrent pipeline writes): steps 6-8 use a zero retention window.
+The job must run exclusively (no concurrent pipeline writes): step 3 uses a zero retention window.
+Outside dev only the Dagster job (writer pool) executes erasures; the CLI only queues them.
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import hmac
 import json
@@ -44,18 +42,15 @@ from governance.config import catalog_of, manifest_path
 from governance.erasure import queue as rq
 from governance.erasure.plan import (
     KEYSTORE_SCHEMA,
-    ErasurePlan,
     build_plan,
-    build_preview,
     subject_query,
     validate_request_id,
     validate_subject_key,
 )
-from governance.erasure.storage_scan import scan_storage
 from ingestion.framework.pseudonym import pseudonymise
 from ingestion.framework.spec import list_sources
 from lakehouse.objectstore import delete_permanently, purge_noncurrent
-from lakehouse.settings import LAYERS, S3Settings, layer_bucket, pseudonym_pepper
+from lakehouse.settings import LAYERS, S3Settings, pseudonym_pepper
 from lakehouse.trino_client import TrinoClient, fqn
 
 log = logging.getLogger(__name__)
@@ -63,6 +58,7 @@ AUDIT_SCHEMA = "audit"
 AUDIT_TABLE = "erasure_log"
 WORK_TABLE_SUFFIXES = ("__dbt_tmp", "__stage", "__dbt_backup")  # dbt / dimension materialization
 TOMBSTONE_SUFFIX = ".erased.json"
+DRY_RUN_REQUEST = "00000000-0000-0000-0000-000000000000"  # placeholder id: a dry run queues nothing
 
 
 class ErasureVerificationError(RuntimeError):
@@ -97,10 +93,9 @@ class ErasureReport:
     raw_files: list[str] = field(default_factory=list)
     purged_tables: list[str] = field(default_factory=list)
     remaining: dict[str, int] = field(default_factory=dict)
-    storage_hits: list[str] = field(default_factory=list)
     dropped_work_tables: list[str] = field(default_factory=list)
-    purged_object_versions: int = 0
-    deferred_hits: list[str] = field(default_factory=list)  # noncurrent, outside touched tables: expire with the window
+    purged_object_versions: int = 0  # for the whole batch
+    planned: list[str] = field(default_factory=list)  # dry run: "<table> [<action>]"
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -139,16 +134,6 @@ def _baseline_tables(trino: TrinoClient) -> list[str]:
     return [f"{catalog}.{KEYSTORE_SCHEMA}.{r[0]}" for r in rows if r[0].endswith("__baseline")]
 
 
-def verification_mode(value: bool | str | None) -> str:
-    """``ERASURE_VERIFY_STORAGE``: ``full``/``true`` scans every object version of the four lake
-    buckets (O(lake), audits only); ``scoped`` scans the locations of the touched tables and the
-    subject's raw files (O(touched tables)); anything else: no object scan (SQL verification only)."""
-    text = str(value).strip().lower() if value is not None else ""
-    if text in ("1", "true", "yes", "full"):
-        return "full"
-    return "scoped" if text == "scoped" else "off"
-
-
 def table_location(trino: TrinoClient, name: str) -> str | None:
     """``bucket/prefix/`` of an Iceberg table, from its metadata log."""
     catalog, schema, table = name.split(".")
@@ -157,10 +142,6 @@ def table_location(trino: TrinoClient, name: str) -> str | None:
     if not path or "/metadata/" not in path:
         return None
     return path.split("://", 1)[-1].rsplit("/metadata/", 1)[0] + "/"
-
-
-def lake_buckets(s3: S3Settings) -> list[str]:
-    return [s3.raw_bucket if layer == "raw" else layer_bucket(layer) for layer in LAYERS]
 
 
 def _session(trino: TrinoClient | None) -> TrinoClient:
@@ -211,16 +192,6 @@ def submit_request(
     )
 
 
-def _dequeue(trino: TrinoClient, request_id: str, purge_fs=None) -> int:
-    """Remove a finished request, then every trace of its key in the queue's history."""
-    trino.execute(f"delete from {rq.queue_table_sql()} where request_id = '{validate_request_id(request_id)}'")
-    iceberg.purge_history(trino, iceberg.TableRef(catalog_of("raw"), rq.QUEUE_NAMESPACE, rq.QUEUE_TABLE))
-    if purge_fs is None:
-        return 0
-    bucket, _, prefix = rq.queue_location().partition("/")
-    return purge_noncurrent(purge_fs, bucket, prefix)
-
-
 def _mark_failed(trino: TrinoClient, request_id: str) -> None:
     """Keep the request (and its key) for the next run; only the status changes."""
     trino.execute(
@@ -229,23 +200,22 @@ def _mark_failed(trino: TrinoClient, request_id: str) -> None:
     )
 
 
-def _write_audit(trino: TrinoClient, audit_table: str, report: ErasureReport, **fields: Any) -> None:
-    """Copy the staged digest into the audit log (no 64-hex value in the query text) and insist
-    on exactly one inserted row: a digest that Trino cannot see would otherwise insert nothing."""
+def _write_audit(trino: TrinoClient, audit_table: str, report: ErasureReport, request: dict, started) -> None:
+    """Insert the audit row and insist on exactly one inserted row. The keyed digest is a query
+    parameter: the platform audit sink redacts 64-hex literals in archived query text."""
     details = {k: v for k, v in report.as_dict().items() if k not in ("erasure_id", "subject_digest", "status")}
     result = trino.execute(
-        f"insert into {audit_table} select ?, d.subject_digest, ?, ?, ?, ?, ?, ?, current_user, ? "
-        f"from {rq.digest_table_sql()} d where d.erasure_id = ?",
+        f"insert into {audit_table} values (?, ?, ?, ?, ?, ?, ?, ?, current_user, ?)",
         [
             report.erasure_id,
-            fields["identifier_type"],
-            fields["requested_by"],
-            f"{fields['reason']} (request {report.request_id})",
+            report.subject_digest,
+            request["identifier_type"],
+            request["requested_by"],
+            f"{request['reason']} (request {report.request_id})",
             report.status,
-            fields["started"],
+            started,
             datetime.now(UTC),
             json.dumps(details, default=str),
-            report.erasure_id,
         ],
     )
     inserted = result[0][0] if result and result[0] else 0
@@ -254,170 +224,182 @@ def _write_audit(trino: TrinoClient, audit_table: str, report: ErasureReport, **
     log.info("erasure %s %s: %s", report.erasure_id, report.status, json.dumps(details, default=str))
 
 
-def execute_request(
-    request_id: str,
+def _purge_queue(trino: TrinoClient, purge_fs) -> int:
+    """The queue held the keys of finished requests: purge its history and noncurrent versions."""
+    iceberg.purge_history(trino, iceberg.TableRef(catalog_of("raw"), rq.QUEUE_NAMESPACE, rq.QUEUE_TABLE))
+    bucket, _, prefix = rq.queue_location().partition("/")
+    return purge_noncurrent(purge_fs, bucket, prefix)
+
+
+def _error(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"[:1000]
+
+
+def execute_batch(
+    requests: list[dict],
     *,
-    subject_key: str,
-    identifier_type: str,
-    requested_by: str,
-    reason: str,
-    scope: str = "full",
-    identifier: str | None = None,
-    verify_storage: bool | str = False,
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
     purge_s3: S3Settings | None = None,
-) -> ErasureReport:
-    """Erase the subject of one queued request. ``subject_key`` / ``identifier`` stay in Python:
-    they are used for the audit digest and the storage scan, never in SQL."""
-    key = validate_subject_key(subject_key)
+) -> list[ErasureReport]:
+    """Erase the subjects of queued requests (dicts with the queue columns), see the module doc.
+    Subject keys stay in Python (audit digest), never in SQL."""
     pepper = pseudonym_pepper()
-    started = datetime.now(UTC)
-    report = ErasureReport(
-        erasure_id=str(uuid.uuid4()),
-        subject_digest=audit_digest(key, pepper),
-        dry_run=False,
-        request_id=validate_request_id(request_id),
-        scope=scope,
-    )
     trino = _session(trino)
     s3 = s3 or S3Settings.from_env()
     purge_s3 = purge_s3 or S3Settings.for_purge()
     fs, purge_fs = s3.filesystem(), purge_s3.filesystem()
     tables = cm.tables_from_manifest(cm.load_manifest(manifest_path()))
-    plan: ErasurePlan = build_plan(request_id, tables, list_sources(), scope=scope)
-    existing = {name for name in plan.tables if _table_exists(trino, name)}
-    steps = [s for s in plan.steps if s.table in existing]
-
-    for step in steps:
-        report.rows[f"{step.table} [{step.action}]"] = int(trino.scalar(step.count_sql) or 0)
-    files: set[str] = set()
-    for table, sql in plan.raw_file_queries:
-        if table in existing:
-            files.update(r[0] for r in trino.execute(sql))
-    report.raw_files = sorted(files)
-    baselines = _baseline_tables(trino)
-    mode = verification_mode(verify_storage)
-    # where the subject's data is: locations of the touched tables (read before the work - Iceberg
-    # keeps a table's location, its files change), dropped work tables, the subject's raw files
-    touched = [loc for loc in (table_location(trino, n) for n in sorted(existing | set(baselines))) if loc]
-
+    sources = list_sources()
     audit_table = _ensure_audit_table(trino)
-    rq.stage_digest(report.erasure_id, report.subject_digest)
-    failure: Exception | None = None
+    baselines = _baseline_tables(trino)
+    exists: dict[str, bool] = {}
+    locations: list[str] = []
+    dropped = drop_work_tables(trino, locations)
+    touched: set[str] = set()
+    work: list[tuple[ErasureReport, dict, list, datetime, Exception | None]] = []
+
+    # 1. the deletes and updates of every request
+    for request in requests:
+        started = datetime.now(UTC)
+        report = ErasureReport(
+            erasure_id=str(uuid.uuid4()),
+            subject_digest="-",
+            dry_run=False,
+            request_id=request["request_id"],
+            scope=request["scope"],
+            dropped_work_tables=dropped,
+        )
+        steps: list = []
+        try:
+            request_id = validate_request_id(request["request_id"])
+            report.subject_digest = audit_digest(validate_subject_key(request["subject_key"]), pepper)
+            plan = build_plan(request_id, tables, sources, scope=request["scope"])
+            for name in plan.tables:
+                if name not in exists:
+                    exists[name] = _table_exists(trino, name)
+            steps = [s for s in plan.steps if exists[s.table]]
+            for step in steps:
+                report.rows[f"{step.table} [{step.action}]"] = int(trino.scalar(step.count_sql) or 0)
+            files: set[str] = set()
+            for table, sql in plan.raw_file_queries:
+                if exists.get(table):
+                    files.update(r[0] for r in trino.execute(sql))
+            report.raw_files = sorted(files)
+            for step in steps:
+                for statement in step.statements:
+                    trino.execute(statement)
+            for name in baselines:
+                trino.execute(
+                    f"delete from {fqn(*name.split('.'))} where business_key in ({subject_query(request_id)})"
+                )
+            for path in report.raw_files:
+                delete_permanently(purge_fs, s3.raw_bucket, path)
+                tombstone = {
+                    "erased_at": datetime.now(UTC).isoformat(),
+                    "erasure_id": report.erasure_id,
+                    "reason": "GDPR art. 17 erasure; records of other data subjects remain in the raw index",
+                }
+                fs.pipe_file(f"{s3.raw_bucket}/{path}{TOMBSTONE_SUFFIX}", json.dumps(tombstone).encode())
+            touched.update(s.table for s in steps)
+            touched.update(baselines)
+            work.append((report, request, steps, started, None))
+        except Exception as exc:
+            log.exception("erasure request %s failed before the purge", request.get("request_id"))
+            work.append((report, request, steps, started, exc))
+
+    # 2. once per touched table, for the whole batch
+    purged_tables: list[str] = []
+    purge_failure: Exception | None = None
+    versions = 0
     try:
-        report.dropped_work_tables = drop_work_tables(trino, touched)
-        for step in steps:
-            for statement in step.statements:
-                trino.execute(statement)
-        for name in baselines:
-            trino.execute(f"delete from {fqn(*name.split('.'))} where business_key in ({subject_query(request_id)})")
-
-        for path in report.raw_files:
-            delete_permanently(purge_fs, s3.raw_bucket, path)
-            tombstone = {
-                "erased_at": datetime.now(UTC).isoformat(),
-                "erasure_id": report.erasure_id,
-                "reason": "GDPR art. 17 erasure; records of other data subjects remain in the raw index",
-            }
-            fs.pipe_file(f"{s3.raw_bucket}/{path}{TOMBSTONE_SUFFIX}", json.dumps(tombstone).encode())
-
-        for name in sorted(existing | set(baselines)):
+        for name in sorted(touched):
+            location = table_location(trino, name)
+            if location:
+                locations.append(location)
             iceberg.purge_history(trino, iceberg.TableRef(*name.split(".")))
-            report.purged_tables.append(name)
-
-        for step in steps:  # needs the queued key, so before the request is removed
-            left = int(trino.scalar(step.verify_sql) or 0)
-            if left:
-                report.remaining[f"{step.table} [{step.action}]"] = left
-        if report.remaining:
-            raise ErasureVerificationError(f"subject still present in tables: {report.remaining}")
-
-        # Only where the subject's data was are noncurrent versions removed at once. Elsewhere the
-        # deletion safety window (NONCURRENT_VERSION_GRACE_DAYS / bucket lifecycle) stays intact, so
-        # a nightly erasure does not make every accidental delete of the day unrecoverable.
-        for location in touched:
+            purged_tables.append(name)
+        for location in locations:
             bucket, _, prefix = location.partition("/")
-            report.purged_object_versions += purge_noncurrent(purge_fs, bucket, prefix)
-        if mode != "off":
-            needles = [key] + ([identifier] if identifier else [])
-            scope = touched + [f"{s3.raw_bucket}/{p}" for p in report.raw_files]
-            # the queue still holds the key (it is removed only after success): skip its files.
-            # full: every object of the lake; noncurrent versions outside the touched locations are
-            # copies the safety window will expire (e.g. a table dropped and re-created elsewhere) -
-            # reported, not a failure
-            report.storage_hits = scan_storage(
-                purge_fs,
-                lake_buckets(s3),
-                needles,
-                exclude=[rq.queue_location()],
-                prefixes=scope if mode == "scoped" else None,
-                defer_noncurrent_outside=scope if mode == "full" else None,
-                deferred=report.deferred_hits,
-            )
-        if report.storage_hits:
-            raise ErasureVerificationError(f"subject still present in objects: {report.storage_hits[:5]}")
-        report.status = "completed"
+            versions += purge_noncurrent(purge_fs, bucket, prefix)
     except Exception as exc:
-        failure = exc
-        report.status = "failed"
-        report.error = f"{type(exc).__name__}: {exc}"[:1000]
+        log.exception("erasure batch: purge failed; every request of the batch stays queued")
+        purge_failure = exc
 
-    audit = {"identifier_type": identifier_type, "requested_by": requested_by, "reason": reason, "started": started}
-    try:
-        _write_audit(trino, audit_table, report, **audit)
-    except Exception as exc:
+    # 3. per request: verify, audit, dequeue - or keep it queued as failed
+    reports = []
+    for report, request, steps, started, failure in work:
+        report.purged_tables = purged_tables
+        report.purged_object_versions = versions
+        failure = failure or purge_failure
         if failure is None:
-            failure = exc
-            report.status = "failed"
-            report.error = f"{type(exc).__name__}: {exc}"[:1000]
-        else:
-            log.error("erasure %s: audit row could not be written either: %s", report.erasure_id, exc)
-    finally:
-        try:  # the staged digest equals the one in the audit log; leaving it behind leaks nothing new
-            trino.execute(f"delete from {rq.digest_table_sql()} where erasure_id = ?", [report.erasure_id])
-        except Exception as exc:
-            log.error("erasure %s: staged digest not removed: %s", report.erasure_id, exc)
-
-    if failure is None:
+            try:
+                for step in steps:  # needs the queued key, so before the request is removed
+                    left = int(trino.scalar(step.verify_sql) or 0)
+                    if left:
+                        report.remaining[f"{step.table} [{step.action}]"] = left
+                if report.remaining:
+                    raise ErasureVerificationError(f"subject still present in tables: {report.remaining}")
+            except Exception as exc:
+                failure = exc
+        report.status = "failed" if failure else "completed"
+        report.error = _error(failure) if failure else None
         try:
-            report.purged_object_versions += _dequeue(trino, request_id, purge_fs)
+            _write_audit(trino, audit_table, report, request, started)
+            if failure is None:
+                trino.execute(
+                    f"delete from {rq.queue_table_sql()} where request_id = '{validate_request_id(report.request_id)}'"
+                )
         except Exception as exc:
-            failure = exc
-            report.status = "failed"
-            report.error = f"dequeue: {type(exc).__name__}: {exc}"[:1000]
-    if failure is not None:
-        try:
-            _mark_failed(trino, request_id)
-        except Exception as exc:  # the request is still queued (status unchanged): it is retried anyway
-            log.error("erasure request %s: could not mark it failed: %s", request_id, exc)
-        log.error("erasure request %s failed (kept in the queue): %s", request_id, report.error)
-        with contextlib.suppress(AttributeError):  # read by process_pending_requests
-            failure.erasure_report = report  # type: ignore[attr-defined]
-        raise failure
-    return report
+            if failure is not None:
+                log.error("erasure %s: audit row could not be written either: %s", report.erasure_id, exc)
+            failure = failure or exc
+            report.status, report.error = "failed", _error(failure)
+        if failure is not None:
+            try:
+                _mark_failed(trino, report.request_id)
+            except Exception as exc:  # still queued (status unchanged): it is retried anyway
+                log.error("erasure request %s: could not mark it failed: %s", report.request_id, exc)
+            log.error("erasure request %s failed (kept in the queue): %s", report.request_id, report.error)
+        reports.append(report)
+    return reports
 
 
-def preview(subject_key: str, *, trino: TrinoClient | None = None) -> ErasureReport:
-    """Dry run: what an erasure would remove, read-only. Nothing is queued or written (no
-    service-group write needed); query texts carry only a two-character key prefix."""
-    key = validate_subject_key(subject_key)
-    report = ErasureReport(erasure_id="dry-run", subject_digest=audit_digest(key, pseudonym_pepper()), dry_run=True)
-    trino = trino or TrinoClient(source="lakehouse-erasure")
+def preview(*, scope: str = "full") -> ErasureReport:
+    """Dry run: the tables and actions an erasure would apply, from the same plan (no identifier,
+    no Trino query, nothing written). The row counts are reported by the executed job."""
     tables = cm.tables_from_manifest(cm.load_manifest(manifest_path()))
-    files: set[str] = set()
-    for q in build_preview(tables, list_sources(), key):
-        if not _table_exists(trino, q.table):
-            continue
-        count = 0
-        for row in trino.execute(q.sql):
-            if key in row[: q.key_columns]:
-                count += int(row[-1])
-                if q.with_files:
-                    files.add(row[q.key_columns])
-        report.rows[q.label] = count
-    report.raw_files = sorted(files)
+    plan = build_plan(DRY_RUN_REQUEST, tables, list_sources(), scope=scope)
+    report = ErasureReport(erasure_id="dry-run", subject_digest="-", dry_run=True, scope=scope)
+    report.planned = [f"{s.table} [{s.action}]" for s in plan.steps]
+    report.planned += [f"native raw files located through {t} [delete all versions]" for t, _ in plan.raw_file_queries]
     return report
+
+
+def _requests(trino: TrinoClient, request_id: str | None = None) -> list[dict]:
+    where = f" where request_id = '{validate_request_id(request_id)}'" if request_id else ""
+    rows = trino.execute(
+        "select request_id, subject_key, identifier_type, requested_by, reason, scope "
+        f"from {rq.queue_table_sql()}{where} order by requested_at"
+    )
+    names = ("request_id", "subject_key", "identifier_type", "requested_by", "reason", "scope")
+    return [dict(zip(names, r, strict=True)) for r in rows]
+
+
+def _finish(trino: TrinoClient, reports: list[ErasureReport], purge_s3: S3Settings | None) -> list[ErasureReport]:
+    """Purge the queue's history (every run: retried if it failed before), then fail the run when
+    any request failed."""
+    failed = any(r.status != "completed" for r in reports)
+    if reports:
+        try:
+            _purge_queue(trino, (purge_s3 or S3Settings.for_purge()).filesystem())
+        except Exception:
+            log.exception("erasure: purge of the queue history failed (retried by the next run)")
+            if not failed:
+                raise
+    if failed:
+        raise ErasureBatchError(reports)
+    return reports
 
 
 def erase_subject(
@@ -427,78 +409,29 @@ def erase_subject(
     subject_key: str | None = None,
     requested_by: str,
     reason: str,
-    dry_run: bool = False,
-    verify_storage: bool | str = False,
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
 ) -> ErasureReport:
-    """Immediate erasure (CLI): stage the request, execute it. A dry run only reads (preview)."""
+    """Immediate erasure (CLI, dev only): queue the request, execute it."""
     if bool(identifier) == bool(subject_key):
         raise ValueError("give exactly one of identifier / subject_key")
     key = validate_subject_key(subject_key or pseudonymise(identifier, pseudonym_pepper()))
-    if dry_run:
-        return preview(key, trino=trino)
     id_type = identifier_type if identifier else "subject_key"
     request_id = rq.enqueue(key, identifier_type=id_type, requested_by=requested_by, reason=reason)
-    return execute_request(
-        request_id,
-        subject_key=key,
-        identifier=identifier,
-        identifier_type=id_type,
-        requested_by=requested_by,
-        reason=reason,
-        verify_storage=verify_storage,
-        trino=_session(trino),
-        s3=s3,
-    )
+    trino = _session(trino)
+    reports = execute_batch(_requests(trino, request_id), trino=trino, s3=s3)
+    return _finish(trino, reports, None)[0]
 
 
 def process_pending_requests(
     *,
-    verify_storage: bool | str = False,
     trino: TrinoClient | None = None,
     s3: S3Settings | None = None,
     purge_s3: S3Settings | None = None,
 ) -> list[ErasureReport]:
-    """Execute every queued request (nightly Dagster job), oldest first, including requests that
-    failed before. A failing request is logged, marked ``failed`` and kept; the others still run.
-    Raises :class:`ErasureBatchError` at the end when any request failed."""
+    """Execute every queued request in one batch (nightly Dagster job), oldest first, including
+    requests that failed before. Raises :class:`ErasureBatchError` at the end when any failed."""
     rq.ensure_queue()
     trino = _session(trino)
-    pending = trino.execute(
-        # rows queued by an older release carry no scope: the retention policy only queues deregistrations
-        "select request_id, subject_key, identifier_type, requested_by, reason, "
-        "coalesce(scope, case when requested_by = 'retention-policy' then 'deregistration' else 'full' end) "
-        f"from {rq.queue_table_sql()} order by requested_at"
-    )
-    reports: list[ErasureReport] = []
-    for request_id, key, id_type, requested_by, reason, scope in pending:
-        try:
-            reports.append(
-                execute_request(
-                    request_id,
-                    subject_key=key,
-                    identifier_type=id_type,
-                    requested_by=requested_by,
-                    reason=reason,
-                    scope=scope,
-                    verify_storage=verify_storage,
-                    trino=trino,
-                    s3=s3,
-                    purge_s3=purge_s3,
-                )
-            )
-        except Exception as exc:
-            log.exception("erasure request %s failed; continuing with the next one", request_id)
-            report = getattr(exc, "erasure_report", None)
-            if report is None:  # failed before execution started (plan, counts, staging)
-                report = ErasureReport(erasure_id="-", subject_digest="-", dry_run=False, request_id=request_id)
-                report.status, report.error = "failed", f"{type(exc).__name__}: {exc}"[:1000]
-                try:
-                    _mark_failed(trino, request_id)
-                except Exception:
-                    log.exception("erasure request %s: could not mark it failed", request_id)
-            reports.append(report)
-    if any(r.status != "completed" for r in reports):
-        raise ErasureBatchError(reports)
-    return reports
+    reports = execute_batch(_requests(trino), trino=trino, s3=s3, purge_s3=purge_s3)
+    return _finish(trino, reports, purge_s3)

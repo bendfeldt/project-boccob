@@ -71,8 +71,8 @@ migrate: ## Apply pending schema migrations (dev; elsewhere use the Dagster job 
 migrate-status: ## List applied and pending schema migrations (changes nothing)
 	scripts/run.sh lakehouse-migrate --dry-run
 
-erase-dry-run: ## Report what an erasure would remove, read-only (ERASURE_IDENTIFIER=... in the environment)
-	scripts/run.sh lakehouse-erase --dry-run --requested-by "$${USER:-operator}" --reason dry-run
+erase-dry-run: ## Tables and actions an erasure would apply (no identifier, no query; SCOPE=deregistration)
+	scripts/run.sh lakehouse-erase --dry-run --scope "$${SCOPE:-full}"
 
 retention-dry-run: ## Report what the retention policy would delete
 	scripts/run.sh lakehouse-retention --dry-run

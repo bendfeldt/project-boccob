@@ -123,7 +123,6 @@ to a mounted file; the dbt profile reads plain variables only.
 | `MIGRATION_LOCK_TTL_HOURS` | | `6` | age after which an abandoned schema-migration lock row (`curated.audit.schema_migration_lock`) is ignored and removed |
 | `NONCURRENT_VERSION_GRACE_DAYS` | | `7` | deletion safety window: maintenance removes noncurrent object versions only after this many days (or the layer's orphan retention, if longer). Set it equal to the bucket lifecycle `lakehouse_noncurrent_version_days` |
 | `PURGE_S3_SECRET_ACCESS_KEY` | yes | | |
-| `ERASURE_VERIFY_STORAGE` | | `false` | object scan after an erasure: `scoped` = every object version under the locations of the touched tables and the subject's raw files (cost grows with those tables; recommended for test/prod); `full` (or `true`) = every version of the four lake buckets, O(lake) per request - for audits and small lakes only; `false` = SQL verification only |
 | `PURGE_CREDENTIALS_SECRET` | | (unset) | name of a Kubernetes Secret with `PURGE_S3_ACCESS_KEY_ID` / `PURGE_S3_SECRET_ACCESS_KEY` (as deployed: `lakehouse-purge-env`, set on the code location). The jobs `erasure`, `retention` and `iceberg_maintenance` add it to their run pods (`dagster-k8s/config` tag, `env_from`); no other run gets the purge credential (audit N-3). Exact tag (the solution's only `dagster-k8s/config`): `{"container_config": {"env_from": [{"secret_ref": {"name": "<secret>"}}]}}` - so the run launcher can set `only_allow_user_defined_k8s_config_fields: {container_config: {env_from: true}}` (audit R3-1; checked in `tests/unit/test_orchestration.py`) |
 | `INGEST_<SOURCE>_<OPTION>` | | source.yml | per-source option overrides |
 
@@ -197,7 +196,10 @@ pair only in the Secret `PURGE_CREDENTIALS_SECRET` names),
     `(select subject_key from raw.governance.erasure_requests where request_id = '<uuid>')`, the queue
     row is written through pyiceberg (not Trino), and deregistered subjects are queued with
     `INSERT ... SELECT`. Verified in the integration test against `system.runtime.queries`;
-  - opaque request ids, table names, row counts and timestamps.
+  - opaque request ids, table names, row counts and timestamps;
+  - the keyed audit digest of an erased subject (64 hex characters, a parameter of the audit
+    insert): it identifies nobody without the pepper, and the platform audit sink redacts 64-hex
+    literals.
   Ad-hoc queries of people (e.g. a pii-reader filtering on a literal CPR number) are outside the
   solution's control; the platform audit sink redacts 64-hex and CPR-shaped literals (IaC, audit H-1).
 * Erasure executions are recorded in `curated.audit.erasure_log` (no identifiers) and logged as JSON

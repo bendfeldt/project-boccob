@@ -23,16 +23,15 @@ pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
 os.environ.setdefault("DBT_PROJECT_DIR", str(ROOT / "transform"))
 os.environ.setdefault("DBT_PROFILES_DIR", str(ROOT / "transform"))
-os.environ["ERASURE_VERIFY_STORAGE"] = "true"
 
 if not os.environ.get("TRINO_HOST"):
     pytest.skip("integration harness environment not loaded (make integration)", allow_module_level=True)
 
 from trino import exceptions as trino_errors  # noqa: E402
 
-from governance.erasure.executor import erase_subject, submit_request  # noqa: E402
+from governance.erasure.executor import audit_digest, submit_request  # noqa: E402
+from governance.erasure.executor import preview as erasure_preview  # noqa: E402
 from governance.erasure.queue import queue_table_sql  # noqa: E402
-from governance.erasure.storage_scan import object_contains, scan_storage  # noqa: E402
 from ingestion.framework.manifest import read_manifests, sha256_hex  # noqa: E402
 from ingestion.framework.pseudonym import pseudonymise  # noqa: E402
 from ingestion.framework.spec import load_source  # noqa: E402
@@ -40,6 +39,7 @@ from ingestion.sources.borgerportal import generator  # noqa: E402
 from lakehouse.objectstore import iter_versions, read_version  # noqa: E402
 from lakehouse.settings import S3Settings, pseudonym_pepper  # noqa: E402
 from lakehouse.trino_client import TrinoClient  # noqa: E402
+from tests.integration.storage_scan import object_contains, scan_storage  # noqa: E402
 
 SOURCE = load_source("borgerportal")
 SEED, CITIZENS = int(SOURCE.options["seed"]), int(SOURCE.options["citizens"])
@@ -548,7 +548,7 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     stale = noncurrent_hits(fs, BUCKETS, [cpr, key])
     assert stale, "sanity: noncurrent object versions must contain the subject before the erasure"
 
-    # dry run (N-8): counts only - it writes nothing, not even a queue row or a new snapshot
+    # dry run: the plan's tables and actions - it writes nothing, not even a queue row or a snapshot
     def governance_snapshots():
         tables = trino.execute(
             "select table_name from raw.information_schema.tables where table_schema = 'governance' order by 1"
@@ -556,15 +556,13 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
         return {t: trino.scalar(f'select count(*) from raw.governance."{t}$snapshots"') for (t,) in tables}
 
     before_preview = governance_snapshots()
-    preview = erase_subject(identifier=cpr, requested_by="dpo@kommune.example", reason="preview", dry_run=True)
-    assert preview.rows["clean.borgerportal.citizens [delete]"] > 1 and preview.raw_files
-    assert preview.rows["clean.borgerportal.citizens [delete]"] == trino.scalar(
-        "select count(*) from clean.borgerportal.citizens where citizen_id = ?", [key]
-    )
+    preview = erasure_preview()
+    assert "clean.borgerportal.citizens [delete]" in preview.planned
     assert governance_snapshots() == before_preview
+    citizen_rows = trino.scalar("select count(*) from clean.borgerportal.citizens where citizen_id = ?", [key])
 
     request_id = submit_request(identifier=cpr, requested_by="dpo@kommune.example", reason="integration test")
-    result = run_job("erasure")  # GovernanceResource verifies the object store itself (ERASURE_VERIFY_STORAGE)
+    result = run_job("erasure")
     events = json.dumps([str(e.event_specific_data) for e in result.all_events])
     assert cpr not in events and key not in events, "no identifier may leak into orchestrator events"
 
@@ -580,7 +578,10 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     # H-1: no query issued by the erasure tooling carries the identifier or the pseudonym
     texts = erasure_query_texts(trino)
     assert len(texts) > 50, "sanity: the erasure queries are in the query history"
-    assert not [t for t in texts if key in t or cpr in t or re.search(r"[0-9a-f]{64}", t)], "no key-like literal"
+    assert not [t for t in texts if key in t or cpr in t], "no subject key or identifier in query text"
+    # the only 64-hex value is the keyed audit digest (the platform audit sink redacts such literals)
+    digest = audit_digest(key, pseudonym_pepper())
+    assert {h for t in texts for h in re.findall(r"[0-9a-f]{64}", t)} <= {digest}
     assert any(request_id in t for t in texts), "statements reference the request id instead"
     for table, column in (
         ("clean.borgerportal.citizens", "citizen_id"),
@@ -623,9 +624,8 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     assert len(audit) == 1 and audit[0][:3] == ["completed", "dpo@kommune.example", "svc-dagster"]
     assert request_id in audit[0][3]
     assert cpr not in json.dumps(audit) and key not in json.dumps(audit)
-    from governance.erasure.executor import audit_digest
-
-    assert audit[0][4] == audit_digest(key, pseudonym_pepper()), "the keyed digest proves which subject was erased"
+    assert audit[0][4] == digest, "the keyed digest proves which subject was erased"
+    assert json.loads(audit[0][5])["rows"]["clean.borgerportal.citizens [delete]"] == citizen_rows
     assert trino.scalar(f"select count(*) from {queue_table_sql()}") == 0
     for user in ("erik-engineer", "alice-admin"):  # M-1: the evidence cannot be tampered with
         with pytest.raises(trino_errors.TrinoUserError):

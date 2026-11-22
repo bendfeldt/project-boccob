@@ -1,10 +1,10 @@
-"""Deep verification: prove that an erased subject is physically gone from object storage.
+"""Integration test helper: prove that an erased subject is physically gone from object storage.
 
 Reads every object version (current and noncurrent) of the given buckets and searches it for the
 needles (identifier, pseudonym).
 Parquet files are decoded column by column, Avro files (Iceberg manifests, which carry column
 min/max bounds truncated to 16 characters) record by record; everything else is searched as bytes.
-This is O(size of the lake) and meant for erasure verification and tests, not for routine use.
+This is O(size of the lake): a test helper, not part of the erasure (that verifies in SQL).
 """
 
 from __future__ import annotations
@@ -68,46 +68,18 @@ def object_contains(path: str, data: bytes, needles: list[str]) -> bool:
     return _bytes_hit(data, needles)
 
 
-def scan_storage(
-    fs: Any,
-    buckets: list[str],
-    needles: list[str],
-    exclude: list[str] | None = None,
-    prefixes: list[str] | None = None,
-    defer_noncurrent_outside: list[str] | None = None,
-    deferred: list[str] | None = None,
-) -> list[str]:
-    """Return every object version (current or noncurrent) that still contains one of the needles.
-
-    Noncurrent versions are included: on a versioned bucket a deleted object is still readable
-    by version id. Hits are reported as ``s3://bucket/key?versionId=...``. ``exclude`` lists
-    ``bucket/key-prefix`` strings whose objects are not inspected (the erasure queue itself).
-    ``prefixes`` (``bucket/key-prefix``) limits the scan to those locations instead of whole buckets.
-    With ``defer_noncurrent_outside``, hits in *noncurrent* versions outside those prefixes go to
-    ``deferred`` instead of the result (copies that the deletion safety window expires).
-    """
+def scan_storage(fs: Any, buckets: list[str], needles: list[str]) -> list[str]:
+    """Every object version (current or noncurrent) that still contains one of the needles, as
+    ``s3://bucket/key?versionId=...``. Noncurrent versions count: on a versioned bucket a deleted
+    object is still readable by version id."""
     from lakehouse.objectstore import iter_versions, read_version
 
     needles = [n for n in needles if n]
-    if prefixes is None:
-        locations = [(bucket, "") for bucket in buckets]
-    else:
-        locations = sorted({tuple(p.split("/", 1)) if "/" in p else (p, "") for p in prefixes})
     hits = []
-    for bucket, prefix in locations:
-        for version in iter_versions(fs, bucket, prefix):
-            if version.is_delete_marker or any(f"{bucket}/{version.key}".startswith(e) for e in exclude or ()):
-                continue
-            if object_contains(version.key, read_version(fs, bucket, version), needles):
-                hit = f"s3://{bucket}/{version.key}?versionId={version.version_id}"
-                path = f"{bucket}/{version.key}"
-                if (
-                    defer_noncurrent_outside is not None
-                    and not version.is_latest
-                    and not any(path.startswith(p) for p in defer_noncurrent_outside)
-                ):
-                    if deferred is not None:
-                        deferred.append(hit)
-                    continue
-                hits.append(hit)
+    for bucket in buckets:
+        for version in iter_versions(fs, bucket):
+            if not version.is_delete_marker and object_contains(
+                version.key, read_version(fs, bucket, version), needles
+            ):
+                hits.append(f"s3://{bucket}/{version.key}?versionId={version.version_id}")
     return hits

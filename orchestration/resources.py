@@ -36,8 +36,6 @@ class IngestionResource(dg.ConfigurableResource):
 class GovernanceResource(dg.ConfigurableResource):
     """Maintenance, retention and erasure tooling."""
 
-    verify_storage_after_erasure: str = "off"  # off | scoped | full (ERASURE_VERIFY_STORAGE)
-
     def migrate(self, dry_run: bool = False, check_drift: bool = True, holder: str = "dagster"):
         from governance.migrations.runner import run_migrations
 
@@ -56,13 +54,11 @@ class GovernanceResource(dg.ConfigurableResource):
     def process_erasure_requests(self):
         from governance.erasure.executor import process_pending_requests
 
-        return process_pending_requests(verify_storage=self.verify_storage_after_erasure)
+        return process_pending_requests()
 
 
 RESOURCES = {
     "ingestion": IngestionResource(),
-    "governance": GovernanceResource(
-        verify_storage_after_erasure=os.environ.get("ERASURE_VERIFY_STORAGE", "false"),
-    ),
+    "governance": GovernanceResource(),
     "dbt": DbtCliResource(project_dir=dbt_project),
 }
