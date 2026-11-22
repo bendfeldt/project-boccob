@@ -16,10 +16,20 @@ unit_tests:
       - input: ref('cases')
         rows:
           - {case_id: C-1, case_type_code: KT}
+      # format sql: a dict fixture of `this` reads the column types from the table, which does
+      # not exist before the first build of a new lake (dbt fails the whole build then)
       - input: this
-        rows:
-          - {payment_id: P-1, case_id: C-1, case_type_code: null, _loaded_at: "2026-11-01 00:00:00.000000 UTC"}
-          - {payment_id: P-2, case_id: C-9, case_type_code: null, _loaded_at: "2026-11-01 00:00:00.000000 UTC"}
+        format: sql
+        rows: |
+          select payment_id, case_id, cast(null as varchar) as citizen_id, cast(null as varchar) as case_type_code,
+                 cast(null as decimal(18, 2)) as amount, cast(null as varchar) as currency_code,
+                 cast(null as date) as payment_date, cast(null as timestamp(6) with time zone) as booked_at,
+                 cast(null as varchar) as status, cast(null as varchar) as _raw_file, cast(null as bigint) as _raw_row,
+                 cast(null as varchar) as _load_id,
+                 cast(timestamp '2026-11-01 00:00:00.000000 UTC' as timestamp(6) with time zone) as _loaded_at,
+                 cast(null as timestamp(6) with time zone) as _anonymised_at,
+                 cast(null as varchar) as _invocation_id, cast(null as timestamp(6) with time zone) as _transformed_at
+          from (values ('P-1', 'C-1'), ('P-2', 'C-9')) as t (payment_id, case_id)
     expect:
       rows:
         - {payment_id: P-1, case_id: C-1, case_type_code: KT}
