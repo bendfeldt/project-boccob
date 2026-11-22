@@ -109,3 +109,26 @@ registry_trust() {
     export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$entries" no_proxy="${no_proxy:+$no_proxy,}$entries"
   fi
 }
+
+# Platform interface of the targets that act on a running environment (publish, e2e,
+# reset-dev-data): one KEY=value file that the platform writes outside both repositories
+# (platform repository: `make dev-env ENV=<env>`), named by BOCCOB_PLATFORM_ENV. The keys are
+# specified in docs/platform-contract.md, section 4; nothing else of the platform is used.
+#   load_platform_env KEY...   loads the file and requires the given keys
+load_platform_env() {
+  local f="${BOCCOB_PLATFORM_ENV:-}" k dir
+  [[ -n "$f" ]] || die "BOCCOB_PLATFORM_ENV is not set: point it at the environment file the platform writes (docs/platform-contract.md, section 4)"
+  [[ -f "$f" ]] || die "BOCCOB_PLATFORM_ENV=$f does not exist"
+  dir="$(cd "$(dirname "$f")" && pwd -P)"
+  [[ "$dir/" != "$(cd "$ROOT" && pwd -P)/"* ]] || die "the platform environment file must live outside the checkout"
+  set -a
+  # shellcheck disable=SC1090
+  source "$f"
+  set +a
+  for k in "$@"; do
+    [[ -n "${!k:-}" ]] || die "$f does not set $k (docs/platform-contract.md, section 4)"
+  done
+}
+
+# kubectl against the environment, in the namespace of the Dagster deployment
+kc() { kubectl --kubeconfig "$BOCCOB_KUBECONFIG" -n "$BOCCOB_DAGSTER_NAMESPACE" "$@"; }

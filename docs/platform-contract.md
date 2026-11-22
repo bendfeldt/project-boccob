@@ -2,22 +2,25 @@
 
 This is the complete interface between the solution repository and the platform (IaC) repository.
 The platform consumes two versioned artifacts and provides a set of environment variables and
-service configurations. Nothing else is shared; there are no cross-repository file references.
+service configurations (sections 1-3). For the targets that act on a running environment
+(`make publish`, `make e2e`, `make reset-dev-data`) it writes one environment file outside both
+repositories (section 4). Nothing else is shared; there are no cross-repository file references.
 
 ## 1. Artifacts published by this repository
 
 | Artifact | Reference | Built by | Pushed by |
 |---|---|---|---|
-| Dagster code location image | `<REGISTRY>/<REGISTRY_NAMESPACE>/dagster-code-location:<VERSION>` | `make image` | `make image-push` |
-| OPA policy bundle (OCI artifact) | `<REGISTRY>/<REGISTRY_NAMESPACE>/opa-policy-bundle:<VERSION>` | `make bundle` | `make bundle-push` |
+| Dagster code location image | `<REGISTRY>/<REGISTRY_NAMESPACE>/dagster-code-location:<VERSION>` | `make image` | `make image-push` (both: `make publish`) |
+| OPA policy bundle (OCI artifact) | `<REGISTRY>/<REGISTRY_NAMESPACE>/opa-policy-bundle:<VERSION>` | `make bundle` | `make bundle-push` (both: `make publish`) |
 
 * `REGISTRY` is the Zot host (required for pushing), `REGISTRY_NAMESPACE` defaults to `boccob`,
   `VERSION` defaults to `0.1.0-<git describe>`.
 * After a push the digest-pinned references are written to `dist/image/image.ref` and
-  `dist/opa/bundle.ref`. These two strings are what the IaC repository takes as variables.
+  `dist/opa/bundle.ref` (`make publish` prints them). These two strings are what the IaC
+  repository takes as variables, after signing them (`make sign REFS="<image ref> <bundle ref>"`
+  there: signing is a platform function, this repository never signs).
 * `make image` also writes `dist/image/sbom.spdx.json` and `sbom.cdx.json` (syft) and
   `dist/image/trivy.json` (trivy) when the tools are installed (`make tools-supply-chain`).
-  With `COSIGN_KEY` set, `make image-push` signs the image and attaches the SBOM attestation.
 
 ### 1.1 Code location image
 
@@ -121,7 +124,7 @@ to a mounted file; the dbt profile reads plain variables only.
 | `PURGE_S3_ACCESS_KEY_ID` | yes | `S3_ACCESS_KEY_ID` | key allowed to remove object versions: `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetObject`, `s3:GetObjectVersion`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on all four lakehouse buckets. Used by erasure (immediate, touched locations only) and maintenance (after the safety window); without it they fail (by design) on versioned buckets instead of leaving data behind. As deployed: only in the Secret named by `PURGE_CREDENTIALS_SECRET` |
 | `NONCURRENT_VERSION_GRACE_DAYS` | | `7` | deletion safety window: maintenance removes noncurrent object versions only after this many days (or the layer's orphan retention, if longer). Set it equal to the bucket lifecycle `lakehouse_noncurrent_version_days` |
 | `PURGE_S3_SECRET_ACCESS_KEY` | yes | | |
-| `PURGE_CREDENTIALS_SECRET` | | (unset) | name of a Kubernetes Secret with `PURGE_S3_ACCESS_KEY_ID` / `PURGE_S3_SECRET_ACCESS_KEY` (as deployed: `lakehouse-purge-env`, set on the code location). The jobs `erasure`, `retention` and `iceberg_maintenance` add it to their run pods (`dagster-k8s/config` tag, `env_from`); no other run gets the purge credential (audit N-3). Exact tag (the solution's only `dagster-k8s/config`): `{"container_config": {"env_from": [{"secret_ref": {"name": "<secret>"}}]}}` - so the run launcher can set `only_allow_user_defined_k8s_config_fields: {container_config: {env_from: true}}` (audit R3-1; checked in `tests/unit/test_orchestration.py`) |
+| `PURGE_CREDENTIALS_SECRET` | | (unset) | name of a Kubernetes Secret with `PURGE_S3_ACCESS_KEY_ID` / `PURGE_S3_SECRET_ACCESS_KEY` (as deployed: `lakehouse-purge-env`, set on the code location). The jobs `erasure`, `retention` and `iceberg_maintenance` add it to their run pods (`dagster-k8s/config` tag, `env_from`); no other run gets the purge credential. Exact tag (the solution's only `dagster-k8s/config`): `{"container_config": {"env_from": [{"secret_ref": {"name": "<secret>"}}]}}` - so the run launcher can set `only_allow_user_defined_k8s_config_fields: {container_config: {env_from: true}}` (checked in `tests/unit/test_orchestration.py`) |
 | `INGEST_<SOURCE>_<OPTION>` | | source.yml | per-source option overrides |
 
 For TLS with the internal CA also set the generic variables honoured by the underlying libraries:
@@ -199,6 +202,40 @@ pair only in the Secret `PURGE_CREDENTIALS_SECRET` names),
     insert): it identifies nobody without the pepper, and the platform audit sink redacts 64-hex
     literals.
   Ad-hoc queries of people (e.g. a pii-reader filtering on a literal CPR number) are outside the
-  solution's control; the platform audit sink redacts 64-hex and CPR-shaped literals (IaC, audit H-1).
+  solution's control; the platform audit sink redacts 64-hex and CPR-shaped literals.
 * Erasure executions are recorded in `curated.audit.erasure_log` (no identifiers) and logged as JSON
   on stdout of the run pod.
+
+## 4. Platform environment file (`make publish`, `make e2e`, `make reset-dev-data`)
+
+The platform writes one file per environment outside both repositories (platform repository:
+`make dev-env ENV=<env>`; expected at `~/.boccob/<env>/developer.env`) and the developer points
+`BOCCOB_PLATFORM_ENV` at it. Format: shell `KEY=value` lines, no secrets inline - secrets are
+referenced as paths of files (mode 0600) next to it. The scripts refuse a file inside the checkout
+and fail with the name of any missing key. These are the only facts about the platform the
+solution uses:
+
+| Key | Used by | Meaning |
+|---|---|---|
+| `BOCCOB_ENV` | e2e, reset | environment name; both refuse anything but `dev` |
+| `BOCCOB_REGISTRY_HOST` | publish | registry host[:port] to push to, e.g. `registry.dev.lakehouse.internal:5000` |
+| `BOCCOB_REGISTRY_CA_FILE` | publish | PEM of the CA of the registry certificate |
+| `BOCCOB_REGISTRY_USER` | publish | push user |
+| `BOCCOB_REGISTRY_PASSWORD_FILE` | publish | file holding the push password |
+| `BOCCOB_KUBECONFIG` | e2e, reset | kubeconfig with access to the Dagster namespace (exec into the code location, read jobs and the purge Secret) |
+| `BOCCOB_DAGSTER_NAMESPACE` | e2e, reset | namespace of the Dagster deployment, e.g. `orchestration` |
+| `BOCCOB_CODE_LOCATION` | e2e, reset | `kubectl exec` target of the code location deployment, e.g. `deploy/<name>`; its environment (svc-dagster, `PURGE_CREDENTIALS_SECRET`) is used as is |
+| `BOCCOB_CODE_LOCATION_NAME` | e2e | Dagster code location (repository location) name, e.g. `lakehouse` |
+| `BOCCOB_DAGSTER_GRAPHQL_URL` | e2e | Dagster webserver GraphQL endpoint reachable **from the code location pod**, e.g. `http://<webserver service>.<namespace>.svc:80/graphql` |
+| `BOCCOB_DAGSTER_URL` | (docs) | Dagster UI for people |
+| `BOCCOB_CA_BUNDLE` | e2e | CA bundle that verifies the public Trino and Keycloak endpoints |
+| `BOCCOB_TRINO_URL` | e2e | public Trino endpoint, e.g. `https://trino.dev.lakehouse.internal` (host names must resolve on the developer machine) |
+| `BOCCOB_KEYCLOAK_URL` | e2e | Keycloak base URL, e.g. `https://keycloak.dev.lakehouse.internal` |
+| `BOCCOB_KEYCLOAK_REALM` | e2e | realm of the lakehouse users, e.g. `lakehouse` |
+| `BOCCOB_KEYCLOAK_CLIENT_ID` / `BOCCOB_KEYCLOAK_CLIENT_SECRET_FILE` | e2e | OIDC client of Trino with direct access grants enabled (dev only), and the file holding its secret |
+| `BOCCOB_TEST_ANALYST_USER` / `BOCCOB_TEST_ANALYST_PASSWORD_FILE` | e2e | a test user in group `analyst` only, and its password file |
+| `BOCCOB_TEST_PII_READER_USER` / `BOCCOB_TEST_PII_READER_PASSWORD_FILE` | e2e | a test user in `analyst` and `pii-reader`, and its password file |
+
+`make e2e` also relies on what sections 1-3 already require: Dagster's K8sRunLauncher labels run
+jobs `dagster/run-id=<id>`, and the code location's `PURGE_CREDENTIALS_SECRET` names the Secret
+that only erasure, retention and maintenance runs receive.

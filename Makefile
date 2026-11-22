@@ -5,11 +5,11 @@ SHELL := /usr/bin/env bash
 SOURCE ?= borgerportal
 
 .PHONY: help setup tools tools-supply-chain lint test opa-test dbt-parse classification check-classification \
-        bundle bundle-push image image-push harness-up harness-down integration \
+        bundle bundle-push image image-push publish e2e reset-dev-data harness-up harness-down integration \
         ingest dbt-build migrate migrate-status erase-dry-run retention-dry-run maintain dagster-dev clean
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-22s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-22s %s\n", $$1, $$2}'
 
 setup: ## Create the virtualenv from the lockfile (uv)
 	uv sync --frozen
@@ -49,6 +49,15 @@ image: ## Build the Dagster code location image (+ SBOM/scan if tools present)
 
 image-push: ## Push the image to the registry (REGISTRY=...) and record the digest
 	scripts/push-image.sh
+
+publish: ## Build + push image and OPA bundle to the environment's registry, print both refs (BOCCOB_PLATFORM_ENV)
+	scripts/publish.sh
+
+e2e: ## End-to-end proof on a running dev environment (BOCCOB_PLATFORM_ENV; E2E_SKIP_LOADS=1)
+	scripts/e2e.sh
+
+reset-dev-data: ## dev only: delete ALL lakehouse data of the environment (CONFIRM=dev, BOCCOB_PLATFORM_ENV)
+	scripts/reset-dev-data.sh
 
 harness-up: ## Start the local integration harness (podman: RustFS, Polaris, OPA, Trino)
 	tests/integration/harness.sh up

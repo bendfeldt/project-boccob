@@ -83,8 +83,8 @@ elsewhere while migrations are pending.
    builds the lake with the previous model shape, upgrades it with the new release (migrations through
    the `transform` job) and checks that keystore keys, SCD2 versions and the clean history survive. Add
    the previous shape of your change to `previous_release_project()` in `tests/integration/test_e2e.py`.
-2. **Build and publish** the artifacts (see *Publishing* below) and hand the digest-pinned
-   references to the platform repository.
+2. **Build and publish** the artifacts (`make publish`, see *Publishing* below); the platform
+   signs the two digest-pinned references and takes them as variables.
 3. **Before the deployment:** make sure a recent backup of the lake exists (platform: Polaris database,
    bucket versioning / off-site copy). A migration that rewrites data is not reversible otherwise.
 4. **Deploy** the new image and bundle (IaC). Let running jobs finish; schedules may stay on - every
@@ -98,52 +98,55 @@ elsewhere while migrations are pending.
 
 ## Publishing
 
-`make image image-push bundle bundle-push` (scripts `build-image.sh`, `push-image.sh`,
-`build-opa-bundle.sh`, `push-opa-bundle.sh`). The platform repository wraps them in
-`make release-publish ENV=<env>`, which sets the variables below; the interface is stable:
+```bash
+BOCCOB_PLATFORM_ENV=<file> make publish     # build, smoke test, push image + OPA bundle, print both refs
+```
+
+`scripts/publish.sh` reads the environment's registry, its CA and the push credential from the
+platform environment file (platform-contract.md, section 4) and calls `build-image.sh`,
+`push-image.sh` and `push-opa-bundle.sh` (also usable alone: `make image image-push bundle
+bundle-push` with the variables below). It prints the two digest-pinned references:
+
+```
+dagster_code_location_image = "<registry>/boccob/dagster-code-location@sha256:..."
+opa_bundle_ref              = "<registry>/boccob/opa-policy-bundle@sha256:..."
+```
+
+**Signing is a platform function** (the platform holds the key): run
+`make sign REFS="<image ref> <bundle ref>"` in the platform repository, then set the two
+references as the environment's image and bundle variables and deploy. This repository never signs.
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `REGISTRY` (required for push) | build, push | registry host[:port], e.g. the environment's Zot |
+| `REGISTRY` (required for push) | build, push | registry host[:port] (`make publish`: `BOCCOB_REGISTRY_HOST`) |
 | `REGISTRY_NAMESPACE` | build, push | repository prefix, default `boccob` |
 | `VERSION` | build, push | artifact version, default `0.1.0-<git describe>` |
-| `REGISTRY_CA_FILE` | push | PEM of the CA that signed the registry certificate. Passed per call: podman gets `--cert-dir` (a temporary directory with `ca.crt`), oras `--ca-file`, cosign an `SSL_CERT_FILE` of current trust + this CA. Nothing is written to `/etc`; the temporary directory is removed when the script ends |
-| `REGISTRY_HOST` | push | host[:port] appended to `NO_PROXY`/`no_proxy` for the call (default: host part of `REGISTRY`), so an outbound proxy is not used for the internal registry |
-| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | push | optional login (otherwise log in beforehand) |
+| `REGISTRY_CA_FILE` | push | PEM of the CA that signed the registry certificate. Passed per call: podman gets `--cert-dir` (a temporary directory with `ca.crt`), oras `--ca-file`. Nothing is written to `/etc` |
+| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | push | login into a temporary auth file (podman `REGISTRY_AUTH_FILE`, oras `--registry-config`) that is removed when the script ends: no push credential stays on the build host. Without them an existing login is used |
+| `REGISTRY_HOST` | push | host[:port] appended to `NO_PROXY`/`no_proxy` for the call (default: host part of `REGISTRY`) |
 | `REGISTRY_TLS_VERIFY=false`, `REGISTRY_PLAIN_HTTP=1` | push | local test registries only |
-| `BUILD_CA_BUNDLE`, `BUILD_PROXY`, `BUILD_NETWORK`, `UV_DEFAULT_INDEX`, `PYTHON_IMAGE`, `UV_IMAGE` | build | trust, proxy, package index and base images *inside* the image build (see `scripts/build-image.sh`) |
-| `PLATFORMS` | build | target platform(s): `linux/amd64` (x64), `linux/arm64`, or both comma separated. Default: the architecture of the podman host (on macOS the podman machine VM). The platform repository passes the cluster's architecture |
+| `BUILD_CA_BUNDLE`, `BUILD_PROXY`, `BUILD_NETWORK`, `UV_DEFAULT_INDEX`, `PYTHON_IMAGE`, `UV_IMAGE` | build | trust, proxy, package index and base images *inside* the image build (see `scripts/build-image.sh`); `make publish` derives proxy and CA from `HTTPS_PROXY` / `SSL_CERT_FILE` |
+| `SCAN_STRICT` | build | `1` (default): fixable HIGH/CRITICAL findings fail the build when trivy is installed; `0` reports only |
+| `BUILD_STORAGE_ROOT`, `KEEP_LOCAL_IMAGE`, `SKIP_BUILD` | publish | separate podman storage for a disk-constrained host; keep the local image; push what was built |
 
-Results: `dist/image/image.ref` and `dist/opa/bundle.ref` (digest-pinned references), SBOMs and the
-trivy report in `dist/image/`.
+`push-opa-bundle.sh` always rebuilds the bundle first, so a release never ships an older policy
+under a new version. SBOMs (`dist/image/sbom.*.json`) and the trivy report (`dist/image/trivy.json`)
+are produced when `make tools-supply-chain` installed syft and trivy.
 
-**Architectures.** With one platform (the default) the image is a plain single-platform image and
-`image.ref` carries its manifest digest, as before. With `PLATFORMS=linux/amd64,linux/arm64`
-`build-image.sh` builds one image per platform (local names `<ref>-amd64`, `<ref>-arm64`, listed in
-`dist/image/image.local`) and a podman manifest list `<ref>`; `push-image.sh` pushes the list with
-all its images and records the **index digest** in `image.ref`, so one reference runs on both
-architectures (the platform signs that digest). SBOMs and scans are produced per platform
-(`sbom.<arch>.spdx.json`, `trivy.<arch>.json`; the native one also under the plain names). A
-foreign platform needs user-mode emulation on the build machine (qemu-user-static / binfmt_misc on
-Linux; on macOS the emulation must exist inside the podman machine VM - not verified) and is not smoke-tested unless `SMOKE_ALL=1`. The
-base images are pinned by their multi-arch index digest, and `make lint` checks
-(`scripts/check-wheels.py`) that every locked Python dependency has cp313 manylinux x86_64 and
-aarch64 wheels, so the arm64 build needs no compiler. `dbt-core-experimental-parser` is the one
-sdist: its build backend downloads a prebuilt, sha256-checked binary for the platform from the dbt
-GitHub release (x86_64 and aarch64 both published); air-gapped builds need that file mirrored.
-`make tools` / `tools-supply-chain` install the opa, oras, syft, trivy and cosign builds for this
-machine (linux/amd64, linux/arm64, darwin/arm64).
-
-Signing is done by the platform repository (`make sign`, cosign with the OpenBao transit key),
-not here: leave `COSIGN_KEY` unset (it exists only for a stand-alone build host). The air-gap
-path - moving the image, its signature and attestations and the OPA bundle by digest into an
-air-gapped environment's Zot - is likewise a platform script; this repository only produces the
-artifacts and their digests.
+**Architectures.** The image is built natively for the machine that runs podman: x64 (linux/amd64)
+on an x64 Linux host, arm64 on an arm64 Linux host or Apple Silicon (inside the podman machine VM).
+A cluster of the other architecture gets its image from a native build on such a machine; there is
+no cross-build or emulation. `make lint` checks (`scripts/check-wheels.py`) that every locked Python
+dependency has cp313 manylinux x86_64 and aarch64 wheels, so the arm64 build needs no compiler.
+`dbt-core-experimental-parser` is the one sdist: its build backend downloads a prebuilt,
+sha256-checked binary for the platform from the dbt GitHub release; air-gapped builds need that
+file mirrored. `make tools` / `tools-supply-chain` install the opa, oras, syft and trivy builds for
+this machine (linux/amd64, linux/arm64, darwin/arm64).
 
 ## Break-glass repair of protected schemas
 
 `curated.keystore`, `curated.audit` and `raw.governance` accept writes only from the service group
-(`lakehouse-service`, i.e. `svc-dagster`); platform administrators have no bypass (audit M-1). A repair
+(`lakehouse-service`, i.e. `svc-dagster`); platform administrators have no bypass. A repair
 - e.g. a corrupted keystore row or a stuck erasure request - therefore runs **as a migration**:
 
 1. A ticket describes the defect and the fix; a second person reviews the migration file (four eyes:

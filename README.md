@@ -2,8 +2,10 @@
 
 Data code of the Boccob lakehouse: ingestion (dlt), transformation (dbt on Trino/Iceberg), governance
 (OPA policies, retention, right to erasure) and orchestration (Dagster). The platform itself (k3s,
-RustFS, Polaris, Trino, OPA, Dagster, OpenBao, Keycloak) lives in the IaC repository and consumes
-this repository only through two published artifacts, see [docs/platform-contract.md](docs/platform-contract.md).
+RustFS, Polaris, Trino, OPA, Dagster, OpenBao, Keycloak) lives in the separate platform (IaC)
+repository. The two repositories share no files: the platform consumes two published artifacts,
+and provides one environment file for the targets that act on a running environment, see
+[docs/platform-contract.md](docs/platform-contract.md).
 
 ```
 ingestion/       dlt framework (LAND native files, INDEX schema-on-read) + sources/<name>/
@@ -19,9 +21,9 @@ docs/            data-layers, keystore, gdpr, adding-a-source, releases, platfor
 
 ## Quick start
 
-To run the whole platform (cluster, Trino, Dagster, ...) with this code on it, follow the
-[getting-started guide in the IaC repository](https://github.com/bendfeldt/project-boccob-iac/blob/main/docs/getting-started.md).
-The commands below only cover this repository on its own.
+To run the whole platform (cluster, Trino, Dagster, ...) follow the getting-started guide of the
+platform repository; it ends with `make dev-env ENV=dev`, which writes the environment file this
+repository's `make publish` / `make e2e` read. The commands below cover this repository on its own.
 
 Requirements: `uv`, `podman`, GNU make, python 3.13.
 
@@ -63,15 +65,20 @@ Read more:
 * [docs/releases.md](docs/releases.md) - schema evolution without data loss: migrations, release procedure, break-glass
 * [docs/platform-contract.md](docs/platform-contract.md) - artifacts, environment variables, platform requirements
 
-## Building and publishing the artifacts
+## Publishing a release and proving it on an environment
 
 ```bash
-make tools-supply-chain                               # syft, trivy, cosign (optional)
-REGISTRY=zot.dev.lakehouse.internal make image        # build, smoke test, SBOM, scan
-REGISTRY=zot.dev.lakehouse.internal make image-push   # -> dist/image/image.ref (digest)
-make bundle                                           # dist/opa/bundle.tar.gz
-REGISTRY=zot.dev.lakehouse.internal make bundle-push  # -> dist/opa/bundle.ref (digest)
+export BOCCOB_PLATFORM_ENV=~/.boccob/dev/developer.env   # written by the platform (make dev-env ENV=dev)
+make tools-supply-chain     # syft, trivy (optional: SBOM + vulnerability scan)
+make publish                # build, smoke test, push image + OPA bundle, print both digest refs
+#   then in the platform repository: make sign REFS="<image ref> <bundle ref>", set them, deploy,
+#   and run the Dagster job `migrate`
+make e2e                    # end-to-end proof on the running dev environment
+CONFIRM=dev make reset-dev-data   # dev only: delete all lakehouse data
 ```
+
+The single steps are `make image image-push bundle bundle-push` with `REGISTRY=...`
+(docs/releases.md).
 
 The build needs a python package index. Options for restricted networks are documented at the top
 of `scripts/build-image.sh` (`UV_DEFAULT_INDEX` for an internal mirror, `BUILD_CA_BUNDLE`,
