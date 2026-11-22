@@ -105,7 +105,7 @@ def test_migrations_run_before_every_dbt_model(defs):
 
 
 def test_purge_tag_sets_only_env_from(monkeypatch):
-    """R3-1: the platform restricts user-defined k8s config to container_config.env_from
+    """the platform restricts user-defined k8s config to container_config.env_from
     (only_allow_user_defined_k8s_config_fields); the solution's only k8s tag must fit that."""
     import importlib
 

@@ -1,5 +1,5 @@
 {#
-  Full refresh guard (audit N-5).
+  Full refresh guard.
 
   A full refresh rebuilds an incremental model from the raw index, which keeps only the last
   `index_days` (90) of deliveries: clean would lose the citizen change history and the 5-year
@@ -85,7 +85,7 @@
 
 
 {#
-  Type change guard (audit R3-4). With on_schema_change='append_new_columns' dbt adds new columns
+  Type change guard. With on_schema_change='append_new_columns' dbt adds new columns
   but silently ignores a changed data type (the merge then casts implicitly or fails late). Refuse
   it: a retype of a released incremental model is a migration (docs/releases.md).
   Found by dispatch (dbt_project.yml: dispatch search order boccob -> dbt).

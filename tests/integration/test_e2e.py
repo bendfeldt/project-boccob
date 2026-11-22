@@ -133,7 +133,7 @@ from borgerportal
 
 
 def previous_release_project(target: Path) -> Path:
-    """The dbt project as release 0.1 shipped it: clean.citizens still carried the CPR number,
+    """The dbt project as the previous release shipped it: clean.citizens still carried the CPR number,
     incremental models used on_schema_change='fail', no _anonymised_at marker, and
     consolidated.party.person was an incremental table (V0004 replaces it by a view). Built from the
     current project so that everything else (keystore macros, other models) is identical."""
@@ -311,12 +311,12 @@ def test_01_initial_load_with_the_previous_release(trino, fs, s3, tmp_path_facto
     assert str(amount) == batch.payments[0]["amount"].replace(".", "").replace(",", ".")
     assert pay_date.strftime("%d-%m-%Y") == batch.payments[0]["payment_date"]
 
-    # release 0.1 kept the CPR number in clean (fixed by migration V0001 in test_02); never beyond clean
+    # the previous release kept the CPR number in clean (fixed by migration V0001 in test_02); never beyond clean
     assert trino.scalar("select count(cpr_number) from clean.borgerportal.citizens") > 0
     assert scan_storage(fs, ["lakehouse-consolidated", "lakehouse-curated"], [sample]) == []
     assert scan_storage(fs, ["lakehouse-clean"], [sample]) != [], "sanity: the old shape stored the CPR in clean"
     assert scan_storage(fs, ["lakehouse-raw"], [sample]) != [], "sanity: the scanner must find the CPR in raw"
-    assert not trino.table_exists("curated", "audit", "schema_migrations"), "release 0.1 had no migrations"
+    assert not trino.table_exists("curated", "audit", "schema_migrations"), "the previous release had no migrations"
 
     # KEYSTORE
     ks = keystore(trino, "dim_citizen")
@@ -356,7 +356,7 @@ def test_02_upgrade_migrates_without_a_wipe(trino, fs, s3, tmp_path):
     applied = trino.execute("select version, name, applied_by from curated.audit.schema_migrations order by 1")
     assert applied[0] == ["0001", "clean_citizens_drop_cpr_number", "svc-dagster"]
     assert "cpr_number" not in clean_columns(trino, "citizens")
-    # history of release 0.1 survives the upgrade: every citizen version of load 1 is still there
+    # history of the previous release survives the upgrade: every citizen version of load 1 is still there
     history = {tuple(r) for r in trino.execute("select citizen_id, source_updated_at from clean.borgerportal.citizens")}
     assert state["clean_citizens1"] < history
     # the dropped column is physically gone: files rewritten, history expired; the replaced files'
@@ -461,7 +461,7 @@ def test_03_changed_load_reuses_keys_and_builds_scd2(trino):
     assert_dense_keys(types)
     assert {v["bk"] for v in types.values()} >= {"FLY", "BYG"}
     assert all(v["vk"] == "" for v in types.values() if v["type"] == "regular")
-    # SCD2 history built by release 0.1 survives the upgrade: same versions, same keys
+    # SCD2 history built by the previous release survives the upgrade: same versions, same keys
     dim2 = citizen_dim(trino)
     regular = {sk for sk, v in ks1.items() if v["type"] == "regular"}
     survived = {version: sk for version, sk in state["dim1"].items() if sk in regular}
@@ -546,7 +546,7 @@ def test_06_access_control_and_masking():
     payload = _as("svc-dagster", "select payload from raw.borgerportal.citizens limit 1")[0][0]
     assert re.search(r"\d{6}-\d{4}", payload), "the pipeline reads the raw record unmasked"
 
-    # protected schemas: only the pipeline service account writes the keystore (M-1)
+    # protected schemas: only the pipeline service account writes the keystore
     for user in ("erik-engineer", "alice-admin"):
         with pytest.raises(denied):
             _as(user, "delete from curated.keystore.dim_citizen where surrogate_key = 1")
@@ -595,7 +595,7 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     for bucket in BUCKETS:
         assert any(h.startswith(f"s3://{bucket}/") for h in before), f"sanity: subject must be present in {bucket}"
     # versioned buckets: deleted files (dropped dbt temp tables, the dimensions dropped in test_03,
-    # expired snapshots) still hold the subject as noncurrent versions - the case C-1 is about
+    # expired snapshots) still hold the subject as noncurrent versions - what the version purge is about
     stale = noncurrent_hits(fs, BUCKETS, [cpr, key])
     assert stale, "sanity: noncurrent object versions must contain the subject before the erasure"
 
@@ -626,7 +626,7 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     expire_safety_window()
     assert scan_storage(fs, BUCKETS, [cpr, key]) == []
     assert all(v.is_latest for b in BUCKETS for v in iter_versions(fs, b)), "no noncurrent version survives"
-    # H-1: no query issued by the erasure tooling carries the identifier or the pseudonym
+    # no query issued by the erasure tooling carries the identifier or the pseudonym
     texts = erasure_query_texts(trino)
     assert len(texts) > 50, "sanity: the erasure queries are in the query history"
     assert not [t for t in texts if key in t or cpr in t], "no subject key or identifier in query text"
@@ -678,7 +678,7 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
     assert audit[0][4] == digest, "the keyed digest proves which subject was erased"
     assert json.loads(audit[0][5])["rows"]["clean.borgerportal.citizens [delete]"] == citizen_rows
     assert trino.scalar(f"select count(*) from {queue_table_sql()}") == 0
-    for user in ("erik-engineer", "alice-admin"):  # M-1: the evidence cannot be tampered with
+    for user in ("erik-engineer", "alice-admin"):  # the evidence cannot be tampered with
         with pytest.raises(trino_errors.TrinoUserError):
             _as(user, "delete from curated.audit.erasure_log")
         with pytest.raises(trino_errors.TrinoUserError):
@@ -731,7 +731,7 @@ def test_09_retention_and_maintenance_jobs(trino, fs, s3):
     assert expired["raw.borgerportal.citizens"] > 0 and future["landing_objects"] > 0
     assert trino.scalar("select count(*) from curated.borgerservice.fact_payment") == facts, "dry run deletes nothing"
 
-    # M-2: deregistered persons are queued for erasure once the grace period is over
+    # deregistered persons are queued for erasure once the grace period is over
     from governance.classification import manifest as cm
     from governance.config import load_retention, manifest_path
     from governance.retention.runner import plan_retention, queue_deregistered
@@ -764,7 +764,7 @@ def test_09_retention_and_maintenance_jobs(trino, fs, s3):
 
 
 def test_10_deregistration_erasure_keeps_bookkeeping_anonymised(trino, fs):
-    """N-6 (controller decision): a deregistered person loses every identifier at once, but payment
+    """Controller decision: a deregistered person loses every identifier at once, but payment
     and case rows stay - unlinkable - until their own 5-year retention expires."""
     from governance.erasure.queue import enqueue
 

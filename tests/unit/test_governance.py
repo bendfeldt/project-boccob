@@ -207,7 +207,7 @@ def test_request_id_is_validated(bad):
 
 
 def test_no_subject_key_in_any_sql_text():
-    """H-1: SQL text is archived in the WORM audit trail; statements reference the subject only
+    """SQL text is archived in the WORM audit trail; statements reference the subject only
     through the opaque request id."""
     plan = build_plan(REQ, cm.tables_from_manifest(GOOD), [load_source("borgerportal")])
     sql = [q for _, q in plan.raw_file_queries]
@@ -329,7 +329,7 @@ def test_retention_session_properties():
         retention_session(["ra w"])
 
 
-# --- object versions (C-1) ---------------------------------------------------------------------
+# --- object versions ---------------------------------------------------------------------
 
 
 def _v(key, vid, minute, latest=False, marker=False):
@@ -376,7 +376,7 @@ def test_noncurrent_selection_respects_age():
 
 
 def test_deregistration_keeps_bookkeeping_rows_anonymised():
-    """N-6 (controller decision): a deregistration erasure removes the person link at once but keeps
+    """Controller decision: a deregistration erasure removes the person link at once but keeps
     rows of tables with their own retention until it expires; an art. 17 request deletes them."""
     tables = cm.tables_from_manifest(GOOD)
     full = {s.table: s for s in build_plan(REQ, tables, []).steps}

@@ -19,7 +19,7 @@ LAYER_GROUPS = (
 # Jobs that remove object versions (erasure, retention, maintenance) need the PURGE_S3_* credentials.
 # With PURGE_CREDENTIALS_SECRET set (name of a Kubernetes Secret holding them), only the run pods of
 # these jobs get that Secret (K8sRunLauncher per-job config), so the platform can drop the purge
-# credential from the environment shared by every run (audit N-3).
+# credential from the environment shared by every run.
 _PURGE_SECRET = os.environ.get("PURGE_CREDENTIALS_SECRET", "").strip()
 PURGE_TAGS = (
     {"dagster-k8s/config": {"container_config": {"env_from": [{"secret_ref": {"name": _PURGE_SECRET}}]}}}
