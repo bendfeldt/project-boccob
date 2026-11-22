@@ -159,11 +159,6 @@ def test_live_column_drift_detection():
     assert any("is_deleted: classified column does not exist" in p for p in problems)
 
 
-def test_legacy_top_level_meta_is_read():
-    node = model("a", "clean", "s", {"x": {"meta": {"pii": "none"}}})
-    assert cm.validate(cm.tables_from_manifest(manifest(node))) == []
-
-
 # --- erasure plan ------------------------------------------------------------------------------
 
 

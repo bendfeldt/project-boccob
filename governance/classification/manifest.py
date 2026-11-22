@@ -64,11 +64,8 @@ class TableClass:
 
 
 def _meta(node: dict[str, Any]) -> dict[str, Any]:
-    """dbt >= 1.10 keeps meta under config; older manifests have it at the top level."""
-    merged: dict[str, Any] = {}
-    merged.update(node.get("meta") or {})
-    merged.update((node.get("config") or {}).get("meta") or {})
-    return merged
+    """dbt >= 1.10 (required by dbt_project.yml) keeps meta under config."""
+    return dict((node.get("config") or {}).get("meta") or {})
 
 
 def _column(name: str, col: dict[str, Any]) -> ColumnClass:

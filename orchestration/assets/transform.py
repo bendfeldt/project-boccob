@@ -38,7 +38,7 @@ def schema_migrations(context: dg.AssetExecutionContext, governance: GovernanceR
 
 
 def _meta(props: Mapping[str, Any]) -> dict[str, Any]:
-    return {**(props.get("meta") or {}), **((props.get("config") or {}).get("meta") or {})}
+    return dict((props.get("config") or {}).get("meta") or {})
 
 
 class LakehouseDbtTranslator(DagsterDbtTranslator):
