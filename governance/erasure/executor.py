@@ -244,6 +244,8 @@ def execute_batch(
 ) -> list[ErasureReport]:
     """Erase the subjects of queued requests (dicts with the queue columns), see the module doc.
     Subject keys stay in Python (audit digest), never in SQL."""
+    if not requests:
+        return []
     pepper = pseudonym_pepper()
     trino = _session(trino)
     s3 = s3 or S3Settings.from_env()

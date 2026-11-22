@@ -203,3 +203,9 @@ def test_cli_only_queues_outside_dev(monkeypatch):
     with pytest.raises(SystemExit) as caught:
         cli.main(["--process-pending"])
     assert caught.value.code == 2
+
+
+def test_empty_queue_touches_nothing(env):
+    trino = FakeTrino()
+    assert run(trino) == []
+    assert env["histories"] == [] and not [s for s in trino.statements if not s.startswith("select")]
