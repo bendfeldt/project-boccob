@@ -99,12 +99,13 @@ token() {
         "$BOCCOB_KEYCLOAK_URL/realms/$BOCCOB_KEYCLOAK_REALM/protocol/openid-connect/token" | jq -r .access_token
 }
 # as_user <user> <token> <sql> : query through the public Trino endpoint with a bearer token
+# (REQUESTS_CA_BUNDLE too: an exported one overrides the client's verify= in requests)
 as_user() {
   local host port
   host="${BOCCOB_TRINO_URL#https://}"; host="${host%%/*}"; port="${host##*:}"; host="${host%%:*}"
   [[ "$port" != "$host" ]] || port=443
   printf '%s' "$3" | TRINO_HOST="$host" TRINO_PORT="$port" TRINO_HTTP_SCHEME=https TRINO_USER="$1" \
-    TRINO_JWT_TOKEN="$2" TRINO_PASSWORD="" TRINO_CA_BUNDLE="$BOCCOB_CA_BUNDLE" uv run --no-sync python -I -c 'import json, sys
+    TRINO_JWT_TOKEN="$2" TRINO_PASSWORD="" TRINO_CA_BUNDLE="$BOCCOB_CA_BUNDLE" REQUESTS_CA_BUNDLE="$BOCCOB_CA_BUNDLE" uv run --no-sync python -I -c 'import json, sys
 from lakehouse.trino_client import TrinoClient
 for row in TrinoClient(source="boccob-e2e").execute(sys.stdin.read()):
     print(json.dumps(row, default=str))' 2>&1
