@@ -289,13 +289,14 @@ def test_01_initial_load_with_the_previous_release(trino, fs, s3, tmp_path_facto
 
 
 def test_02_upgrade_migrates_without_a_wipe(trino, fs, s3, tmp_path):
-    """N-5: the new release runs its migrations first (daily_refresh), then continues incrementally."""
+    """The new release runs its migrations first (transform job), then continues incrementally."""
     # outside dev a full refresh of an incremental model is refused before anything runs
     out = dbt("build", "--full-refresh", "--select", "citizens", env={"LAKEHOUSE_ENV": "prod"}, ok=False)
     assert "refused outside dev" in out
     assert trino.scalar("select count(*) from clean.borgerportal.citizens") == len(state["clean_citizens1"])
 
-    result = run_job("daily_refresh", partition_key="2026-11-02")
+    run_job("ingest_borgerportal", partition_key="2026-11-02")
+    result = run_job("transform")
     checks = [e for e in result.all_events if e.event_type_value == "ASSET_CHECK_EVALUATION"]
     assert len(checks) >= 40 and all(c.event_specific_data.passed for c in checks)
     steps = [e.step_key for e in result.all_events if e.event_type_value == "STEP_SUCCESS"]
@@ -648,7 +649,8 @@ def test_07_erasure_removes_the_subject_everywhere(trino, fs, s3):
 
 
 def test_08_next_load_after_erasure(trino):
-    run_job("daily_refresh", partition_key="2026-11-03")
+    run_job("ingest_borgerportal", partition_key="2026-11-03")
+    run_job("transform")
     ks = keystore(trino, "dim_citizen")
     assert_dense_keys(ks)
     for sk in state["erased_keys"]:

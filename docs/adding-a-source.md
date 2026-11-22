@@ -93,7 +93,7 @@ records in `raw.hr_system.<entity>`.
 ## 4. What you get without further work
 
 * Dagster assets `landing/hr_system/<entity>` and `raw/hr_system/<entity>` with daily partitions, a
-  job `ingest_hr_system`, lineage into the dbt models, inclusion in `daily_refresh`.
+  job and nightly schedule `ingest_hr_system`, lineage into the dbt models (built by the `transform` job).
 * Manifest with checksums for every load, idempotent indexing.
 * Retention of the raw files and index rows, erasure across raw and every model with `meta.gdpr`.
 * Column masks for classified columns as soon as the new OPA bundle is deployed.

@@ -65,8 +65,7 @@ would disappear while the keystore and the facts still refer to their keys.
 ## Where the migrations run
 
 The Dagster asset `curated/audit/schema_migrations` (pool `lakehouse_writer`) applies the pending
-migrations. Every dbt model without an upstream model depends on it, so in `daily_refresh` and
-`transform` the migrations always run before the first model of a release. The job `migrate` runs
+migrations. Every dbt model without an upstream model depends on it, so in `transform` the migrations always run before the first model of a release. The job `migrate` runs
 them alone. The `erasure` and `retention` jobs run them as their first step as well, because their
 SQL is derived from the release's model metadata and may already refer to a new column.
 Every runner takes an advisory lock row in `curated.audit.schema_migration_lock` (protected schema;
@@ -85,7 +84,7 @@ while migrations are pending.
 1. **Develop.** Change the models; for every non-additive change of a table in the first table above
    add the next `V<nnnn>__*.sql`. Run `make lint test` and `make integration`: the integration test
    builds the lake with the previous model shape, upgrades it with the new release (migrations through
-   `daily_refresh`) and checks that keystore keys, SCD2 versions and the clean history survive. Add
+   the `transform` job) and checks that keystore keys, SCD2 versions and the clean history survive. Add
    the previous shape of your change to `previous_release_project()` in `tests/integration/test_e2e.py`.
 2. **Build and publish** the artifacts (see *Publishing* below) and hand the digest-pinned
    references to the platform repository.
@@ -93,11 +92,11 @@ while migrations are pending.
    bucket versioning / off-site copy). A migration that rewrites data is not reversible otherwise.
 4. **Deploy** the new image and bundle (IaC). Let running jobs finish; schedules may stay on - every
    writing job waits for the `lakehouse_writer` pool.
-5. **Migrate.** Launch the Dagster job `migrate` (or let the next `daily_refresh` do it) and check the
+5. **Migrate.** Launch the Dagster job `migrate` (or let the next `transform` do it) and check the
    materialization metadata (`applied`, `history_purged`) and `curated.audit.schema_migrations`.
    A failure leaves the lake on the old shape (or, for a multi-statement migration, partially
    migrated - idempotent statements make the re-run safe): fix forward with a new release.
-6. **Verify.** The next `daily_refresh` must pass all asset checks (keystore integrity, stability
+6. **Verify.** The next `transform` run must pass all asset checks (keystore integrity, stability
    since baseline, SCD2, usage).
 
 ## Publishing

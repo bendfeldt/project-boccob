@@ -21,9 +21,10 @@ def test_definitions_resolve(defs):
 
     dg.Definitions.validate_loadable(defs)
     names = {j.name for j in defs.resolve_all_job_defs()}
-    assert {"ingest_borgerportal", "transform", "daily_refresh", "iceberg_maintenance", "retention", "erasure"} <= names
+    assert {"ingest_borgerportal", "transform", "iceberg_maintenance", "retention", "erasure"} <= names
     assert {s.name for s in defs.schedules} >= {
-        "daily_refresh_schedule",
+        "ingest_borgerportal_schedule",
+        "transform_schedule",
         "erasure_schedule",
         "retention_schedule",
         "iceberg_maintenance_schedule",
@@ -68,13 +69,16 @@ def test_erasure_job_takes_no_identifier(defs):
     assert defs.resolve_job_def("erasure").partitions_def is None
 
 
-def test_daily_refresh_is_partitioned(defs):
-    assert defs.resolve_job_def("daily_refresh").partitions_def is not None
+def test_ingestion_is_partitioned_and_separate_from_dbt(defs):
+    """One failing source must not stop the dbt build or the other sources."""
+    ingest = defs.resolve_job_def("ingest_borgerportal")
+    assert ingest.partitions_def is not None
+    assert all(k.path[0] in ("landing", "raw") for k in ingest.asset_layer.selected_asset_keys)
     assert defs.resolve_job_def("transform").partitions_def is None
 
 
 def test_migrations_run_before_every_dbt_model(defs):
-    """N-5: the schema migrations are part of daily_refresh / transform and precede every model."""
+    """The schema migrations are part of the transform job and precede every model."""
     import dagster as dg
 
     from orchestration.assets.transform import MIGRATIONS_KEY
@@ -96,7 +100,7 @@ def test_migrations_run_before_every_dbt_model(defs):
     for k in models:
         assert MIGRATIONS_KEY in ancestors(k), k
     assert MIGRATIONS_KEY in graph.get(dg.AssetKey(["clean", "borgerportal", "citizens"])).parent_keys
-    for job in ("migrate", "transform", "daily_refresh"):
+    for job in ("migrate", "transform"):
         assert MIGRATIONS_KEY in defs.resolve_job_def(job).asset_layer.selected_asset_keys, job
 
 
@@ -128,7 +132,7 @@ def test_purge_tag_sets_only_env_from(monkeypatch):
             K8sContainerContext(
                 run_k8s_config=UserDefinedDagsterK8sConfig.from_dict(forged)
             ).validate_user_k8s_config_for_run(allow, None)
-        for job in [*reloaded.ingest_jobs, reloaded.migrate_job, reloaded.transform_job, reloaded.daily_refresh_job]:
+        for job in [*reloaded.ingest_jobs, reloaded.migrate_job, reloaded.transform_job]:
             assert "dagster-k8s/config" not in (job.tags or {}), job.name
     finally:
         monkeypatch.delenv("PURGE_CREDENTIALS_SECRET")

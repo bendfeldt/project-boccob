@@ -39,13 +39,12 @@ Dagster jobs, schedules (all `STOPPED` unless `SCHEDULES_ENABLED=true`):
 
 | Job | Schedule (Europe/Copenhagen) | Purpose |
 |---|---|---|
-| `daily_refresh` (daily partitions) | 02:15 | land + index all sources, schema migrations, dbt build with tests |
-| `ingest_<source>` (daily partitions) | - | only the two ingestion stages of one source |
-| `transform` | - | schema migrations, then dbt build |
+| `ingest_<source>` (daily partitions) | 02:15 | land + index one source (one job and schedule per source: a failing source holds back no other) |
+| `transform` | 04:00 | schema migrations, then dbt build with tests (whatever the sources delivered) |
 | `migrate` | - | apply pending schema migrations only - run once after deploying a release (docs/releases.md) |
 | `erasure` | 00:30 | schema migrations, then process queued right-to-erasure requests; fails (after processing all) when one request failed - the failed ones stay queued |
 | `retention` | 01:00 | schema migrations, then apply the retention policy |
-| `iceberg_maintenance` | Sunday 04:00 | optimize, expire snapshots, remove orphan files |
+| `iceberg_maintenance` | Sunday 05:00 | optimize, expire snapshots, remove orphan files |
 
 All assets and ops that write use the Dagster concurrency pool **`lakehouse_writer`**. The platform
 must limit it to 1 (`dagster instance concurrency set lakehouse_writer 1`, or the equivalent
@@ -118,7 +117,6 @@ to a mounted file; the dbt profile reads plain variables only.
 | `DBT_THREADS` | | `4` | dbt concurrency |
 | `LAKEHOUSE_ENV` | | (unset = production rules) | `dev`, `test` or `prod` (as deployed: provided per environment). Only `dev` permits `dbt --full-refresh` of incremental models (docs/releases.md) |
 | `SCHEDULES_ENABLED` | | `false` | start schedules automatically |
-| `SCHEDULE_TIMEZONE` | | `Europe/Copenhagen` | |
 | `INGEST_START_DATE` | | `2026-01-01` | first daily partition |
 | `PURGE_S3_ACCESS_KEY_ID` | yes | `S3_ACCESS_KEY_ID` | key allowed to remove object versions: `s3:ListBucket`, `s3:ListBucketVersions`, `s3:GetObject`, `s3:GetObjectVersion`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on all four lakehouse buckets. Used by erasure (immediate, touched locations only) and maintenance (after the safety window); without it they fail (by design) on versioned buckets instead of leaving data behind. As deployed: only in the Secret named by `PURGE_CREDENTIALS_SECRET` |
 | `MIGRATION_LOCK_TTL_HOURS` | | `6` | age after which an abandoned schema-migration lock row (`curated.audit.schema_migration_lock`) is ignored and removed |

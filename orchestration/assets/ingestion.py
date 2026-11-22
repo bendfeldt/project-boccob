@@ -16,8 +16,9 @@ from ingestion.framework.spec import SourceSpec, list_sources
 from orchestration.resources import IngestionResource
 
 WRITER_POOL = "lakehouse_writer"
+TIMEZONE = "Europe/Copenhagen"  # partitions and schedules
 daily_partitions = dg.DailyPartitionsDefinition(
-    start_date=os.environ.get("INGEST_START_DATE", "2026-01-01"), timezone="Europe/Copenhagen"
+    start_date=os.environ.get("INGEST_START_DATE", "2026-01-01"), timezone=TIMEZONE
 )
 
 

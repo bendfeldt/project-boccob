@@ -4,7 +4,7 @@
     lakehouse-migrate --check     # exit 3 when migrations are pending, change nothing
     lakehouse-migrate             # apply pending migrations in version order, then check drift
 
-Normally the Dagster job ``migrate`` (and the first step of daily_refresh, transform, erasure and
+Normally the Dagster job ``migrate`` (and the first step of transform, erasure and
 retention) applies them under the ``lakehouse_writer`` pool. The CLI takes the same advisory lock
 (``curated.audit.schema_migration_lock``), so it never runs concurrently with a Dagster migration,
 but it is *not* serialised with other writers (dbt, erasure): ``@purge-history`` uses a zero

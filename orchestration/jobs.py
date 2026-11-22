@@ -5,12 +5,11 @@ import os
 import dagster as dg
 
 from lakehouse.settings import LAYERS
-from orchestration.assets.ingestion import SOURCES
+from orchestration.assets.ingestion import SOURCES, TIMEZONE
 from orchestration.assets.transform import MIGRATIONS_KEY
 from orchestration.resources import GovernanceResource
 
 WRITER_POOL = "lakehouse_writer"
-TIMEZONE = os.environ.get("SCHEDULE_TIMEZONE", "Europe/Copenhagen")
 LAYER_GROUPS = (
     dg.AssetSelection.tag("layer", "clean")
     | dg.AssetSelection.tag("layer", "consolidated")
@@ -51,12 +50,6 @@ transform_job = dg.define_asset_job(
     selection=LAYER_GROUPS | dg.AssetSelection.assets(MIGRATIONS_KEY),
 )
 
-daily_refresh_job = dg.define_asset_job(
-    name="daily_refresh",
-    description="End to end: land + index every source for the partition day, schema migrations, then dbt build",
-    selection=dg.AssetSelection.all(),
-)
-
 # --- governance ops --------------------------------------------------------------------------
 
 
@@ -80,7 +73,7 @@ def iceberg_maintenance_op(context: dg.OpExecutionContext, config: MaintenanceCo
     description="Apply pending schema migrations first: governance SQL is derived from this release's models",
 )
 def migrate_op(context: dg.OpExecutionContext, governance: GovernanceResource):
-    # no drift check here: an unrelated drift must not block erasure or retention (daily_refresh checks it)
+    # no drift check here: an unrelated drift must not block erasure or retention (transform checks it)
     report = governance.migrate(check_drift=False, holder=f"dagster run {context.run_id}")
     context.log.info("migrations applied: %s", report.applied)
 
@@ -163,12 +156,25 @@ _status = (
     else dg.DefaultScheduleStatus.STOPPED
 )
 
-daily_refresh_schedule = dg.build_schedule_from_partitioned_job(
-    daily_refresh_job,
-    hour_of_day=2,
-    minute_of_hour=15,
+# one schedule per source: a failing source does not hold back the others; the dbt build runs
+# on its own afterwards with whatever was delivered
+ingest_schedules = [
+    dg.build_schedule_from_partitioned_job(
+        job,
+        hour_of_day=2,
+        minute_of_hour=15,
+        default_status=_status,
+        description=f"Nightly load of yesterday's delivery ({job.name})",
+    )
+    for job in ingest_jobs
+]
+transform_schedule = dg.ScheduleDefinition(
+    name="transform_schedule",
+    job=transform_job,
+    cron_schedule="0 4 * * *",
+    execution_timezone=TIMEZONE,
     default_status=_status,
-    description="Nightly load of yesterday's deliveries followed by the dbt build",
+    description="Schema migrations and dbt build after the nightly ingestion",
 )
 erasure_schedule = dg.ScheduleDefinition(
     name="erasure_schedule",
@@ -188,10 +194,10 @@ retention_schedule = dg.ScheduleDefinition(
 maintenance_schedule = dg.ScheduleDefinition(
     name="iceberg_maintenance_schedule",
     job=iceberg_maintenance,
-    cron_schedule="0 4 * * 0",
+    cron_schedule="0 5 * * 0",
     execution_timezone=TIMEZONE,
     default_status=_status,
 )
 
-JOBS = [*ingest_jobs, migrate_job, transform_job, daily_refresh_job, iceberg_maintenance, retention, erasure]
-SCHEDULES = [daily_refresh_schedule, erasure_schedule, retention_schedule, maintenance_schedule]
+JOBS = [*ingest_jobs, migrate_job, transform_job, iceberg_maintenance, retention, erasure]
+SCHEDULES = [*ingest_schedules, transform_schedule, erasure_schedule, retention_schedule, maintenance_schedule]
