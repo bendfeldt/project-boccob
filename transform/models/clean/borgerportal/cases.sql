@@ -56,5 +56,9 @@ select
   _loaded_at,
   {{ ts6('null') }} as _anonymised_at,  -- set by a deregistration erasure (docs/gdpr.md)
   {{ audit_columns() }}
-from deduplicated
+from deduplicated d
 where _rn = 1
+{% if is_incremental() %}
+  -- an older state (e.g. a re-delivered or re-indexed load) never overwrites a newer one
+  and not exists (select 1 from {{ this }} t where t.case_id = d.case_id and t.source_updated_at > d.source_updated_at)
+{% endif %}

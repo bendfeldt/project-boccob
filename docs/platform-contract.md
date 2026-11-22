@@ -114,7 +114,7 @@ to a mounted file; the dbt profile reads plain variables only.
 | `TRINO_PASSWORD` | yes | | for `DBT_TARGET=password` and the python client |
 | `TRINO_JWT_TOKEN` | yes | | for `DBT_TARGET=jwt` and the python client |
 | `TRINO_CA_BUNDLE` / `LAKEHOUSE_CA_BUNDLE` | | system trust | path of the internal CA bundle (Trino client, s3fs, pyiceberg REST) |
-| `PSEUDONYM_PEPPER` | **yes** | | >= 32 characters; key of the HMAC pseudonymisation. Losing it breaks key continuity, leaking it weakens pseudonymisation - store in OpenBao, back it up, never rotate without a re-index plan (docs/gdpr.md) |
+| `PSEUDONYM_PEPPER` | **yes** | | >= 32 characters; key of the HMAC pseudonymisation. Losing it breaks key continuity, leaking it weakens pseudonymisation - store in OpenBao, back it up, rotation is not supported yet (docs/gdpr.md) |
 | `DBT_THREADS` | | `4` | dbt concurrency |
 | `LAKEHOUSE_ENV` | | (unset = production rules) | `dev`, `test` or `prod` (as deployed: provided per environment). Only `dev` permits `dbt --full-refresh` of incremental models (docs/releases.md) |
 | `SCHEDULES_ENABLED` | | `false` | start schedules automatically |

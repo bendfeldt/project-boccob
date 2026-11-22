@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--logical-date", help="business date of the delivery (YYYY-MM-DD)")
         if name == "index":
             p.add_argument("--load-id", help="index exactly this load")
-            p.add_argument("--reindex", action="store_true", help="replace the rows of --load-id")
+            p.add_argument("--reindex", action="store_true", help="replace the rows of --load-id (dev only)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 

@@ -86,10 +86,12 @@ Groups are the Keycloak groups of the architecture contract.
   clean layer must keep a CPR column for a legal purpose declares it with `cpr: true` (classified
   `direct` or `sensitive`, masked). The dimension carries `birth_year` instead of the birth date.
 * Pseudonymised data is still personal data. The keys are classified `indirect` and deleted on erasure.
-* Pepper rotation changes every key. Procedure: set the new pepper, re-index all retained loads
-  (`lakehouse-ingest index <source> --load-id <id> --reindex`), full-refresh dbt. Surrogate keys of
-  person dimensions are then allocated anew (the business key changed), so plan a rotation like a
-  migration. Loads whose raw files have passed retention cannot be re-indexed.
+* Pepper rotation is **not supported yet**. It changes every key, and the history in clean,
+  consolidated and curated (beyond the 90 days the raw index keeps) cannot be rebuilt: re-indexing
+  and a full refresh would lose it, and without a full refresh every person would exist twice,
+  under the old and the new pseudonym. A rotation needs its own migration that re-keys the stored
+  history in place (old key -> new key per person, keystore business keys included). Re-indexing
+  (`lakehouse-ingest index <source> --load-id <id> --reindex`) and full refresh are dev-only.
 * The synthetic demo data cannot collide with real persons: the day part of every generated CPR
   number is offset by 60 (61-88), names are random combinations, e-mail uses the reserved `.example`
   TLD.

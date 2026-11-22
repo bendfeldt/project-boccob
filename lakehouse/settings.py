@@ -35,6 +35,12 @@ def env(name: str, default: str | None = None, *, required: bool = False) -> str
     return value
 
 
+def is_dev() -> bool:
+    """``LAKEHOUSE_ENV=dev``. Unset or anything else counts as production: operations that can
+    lose history or race the scheduled writers are refused there."""
+    return (os.environ.get("LAKEHOUSE_ENV") or "").strip().lower() == "dev"
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     value = env(name)
     if value is None or value == "":

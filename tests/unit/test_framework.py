@@ -185,3 +185,12 @@ def test_indexed_load_ids_is_a_set_not_a_high_water_mark():
     assert indexed_load_ids({"indexed_load_ids": ["1.0", "3.0"]}, loads) == {"1.0", "3.0"}
     old = {"last_indexed_load_id": "2.0"}  # state of the high-water mark version
     assert indexed_load_ids(old, loads) == {"1.0", "2.0"} and "last_indexed_load_id" not in old
+
+
+def test_reindex_is_refused_outside_dev(monkeypatch):
+    from ingestion.framework.indexing import index_source
+    from ingestion.framework.spec import load_source
+
+    monkeypatch.setenv("LAKEHOUSE_ENV", "prod")
+    with pytest.raises(ValueError, match="refused outside dev"):
+        index_source(load_source("borgerportal"), load_id="1.0", reindex=True)

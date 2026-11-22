@@ -39,7 +39,7 @@ from ingestion.framework.formats import extract_field, iter_records
 from ingestion.framework.manifest import ManifestEntry, read_manifests
 from ingestion.framework.pseudonym import pseudonymise
 from ingestion.framework.spec import EntitySpec, SourceSpec
-from lakehouse.settings import PolarisSettings, S3Settings, pseudonym_pepper
+from lakehouse.settings import PolarisSettings, S3Settings, is_dev, pseudonym_pepper
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +148,11 @@ def index_source(
     polaris: PolarisSettings | None = None,
 ) -> IndexResult:
     """Index committed loads of ``source`` that are not indexed yet (or exactly ``load_id``)."""
+    if reindex and not load_id:
+        raise ValueError("reindex requires an explicit load_id")
+    if reindex and not is_dev():
+        # re-indexed rows get a new _loaded_at and would reach the clean MERGE as new data
+        raise ValueError("reindex is refused outside dev (LAKEHOUSE_ENV=dev)")
     dlt_support.configure_runtime()
     s3 = s3 or S3Settings.from_env()
     polaris = polaris or PolarisSettings.from_env()
@@ -157,8 +162,6 @@ def index_source(
     loads = read_manifests(fs, s3.raw_bucket, source.name, load_id or "*")
     if load_id and load_id not in loads:
         raise LookupError(f"no committed load {load_id} for source {source.name}")
-    if reindex and not load_id:
-        raise ValueError("reindex requires an explicit load_id")
     result = IndexResult(source=source.name)
     loaded_at = datetime.now(UTC)
     touched: set[str] = set()

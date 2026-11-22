@@ -60,3 +60,7 @@ select
 from deduplicated p
 left join {{ ref('cases') }} c on c.case_id = p.case_id
 where p._rn = 1
+{% if is_incremental() %}
+  -- an older state (e.g. a re-delivered or re-indexed load) never overwrites a newer one
+  and not exists (select 1 from {{ this }} t where t.payment_id = p.payment_id and t.booked_at > p.booked_at)
+{% endif %}
