@@ -702,7 +702,9 @@ def test_09_retention_and_maintenance_jobs(trino, fs, s3):
     )
     queue_deregistered(trino, plan)  # idempotent: already queued subjects are not queued twice
     assert trino.scalar(f"select count(*) from {queue_table_sql()}") == tombstoned
-    assert not [t for t in erasure_query_texts(trino) if re.search(r"'[0-9a-f]{64}'", t)]
+    # no subject key in query text; the only 64-hex literals are keyed audit digests of erasures
+    digests = {r[0] for r in trino.execute("select subject_digest from curated.audit.erasure_log")}
+    assert {h for t in erasure_query_texts(trino) for h in re.findall(r"'([0-9a-f]{64})'", t)} <= digests
     trino.execute(f"delete from {queue_table_sql()} where requested_by = 'retention-policy'")
 
     result = run_job("iceberg_maintenance")
