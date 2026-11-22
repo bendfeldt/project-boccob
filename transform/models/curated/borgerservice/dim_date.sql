@@ -11,4 +11,4 @@ select
   week(d) as iso_week,
   day_of_week(d) as iso_day_of_week,
   day_of_week(d) in (6, 7) as is_weekend
-from unnest(sequence(date '2020-01-01', date '2035-12-31', interval '1' day)) as t (d)
+from unnest(sequence(date '1990-01-01', date '2099-12-31', interval '1' day)) as t (d)  -- history and future payments
