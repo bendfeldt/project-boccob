@@ -40,6 +40,9 @@ s3://lakehouse-raw/<source>/_dlt_loads | _dlt_pipeline_state | _dlt_version     
 * The manifest is written last. A load is committed only when its manifest exists; files of an
   aborted load are ignored by the index stage and removed by the retention job.
 * Extraction cursors live in dlt pipeline state, stored in the bucket, so pods are stateless.
+* dlt bookkeeping holds no personal data: dlt keeps only the newest pipeline state files and writes
+  a schema file per schema change; its load records (`_dlt_loads`, one per load, of the landing and
+  the index pipeline) are removed by the retention job with the native files (30 days).
 
 **Index (INDEX).** `raw.<source>.<entity>` makes the records addressable from SQL:
 

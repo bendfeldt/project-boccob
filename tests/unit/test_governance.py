@@ -313,9 +313,12 @@ def test_expired_landing_objects():
         "s/e/load_date=2026-06-20/300.3/c.json",  # aborted load, older than the uncommitted cutoff
         "s/e/load_date=2026-06-29/400.4/d.json",  # aborted load, still inside the grace period
         "s/_manifest/100.1.x.jsonl",
+        "s/_dlt_loads/s__100.1.jsonl",  # dlt load record of an expired load
+        "iceberg/s/_dlt_loads/s__1782345600.5.jsonl",  # recent (index pipeline)
+        "s/_dlt_pipeline_state/land_s__100.1__h.jsonl",  # state: dlt keeps the newest ones itself
     ]
     expired = expired_landing_objects(keys, {"100.1", "200.2"}, date(2026, 5, 31), date(2026, 6, 28))
-    assert expired == [keys[0], keys[2]]
+    assert expired == [keys[0], keys[2], keys[5]]
 
 
 def test_retention_session_properties():

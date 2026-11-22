@@ -17,6 +17,8 @@ from lakehouse.trino_client import TrinoClient, fqn, ident
 
 log = logging.getLogger(__name__)
 _LOAD_DATE = re.compile(r"load_date=(\d{4}-\d{2}-\d{2})/([0-9.]+)/")
+# dlt's load records (one small file per load, never removed by dlt): <schema>__<load_id>.jsonl
+_DLT_LOAD = re.compile(r"/_dlt_loads/[^/]*__([0-9.]+)\.jsonl$")
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,10 @@ def expired_landing_objects(
     """Select object keys (relative to the bucket) whose retention has expired."""
     expired = []
     for key in keys:
+        record = _DLT_LOAD.search(key)
+        if record and landing_cutoff and date.fromisoformat(load_date_of(record.group(1))) < landing_cutoff:
+            expired.append(key)
+            continue
         m = _LOAD_DATE.search(key)
         if not m:
             continue
@@ -201,8 +207,9 @@ def run_retention(
     report["deregistered_subjects"] = queue_deregistered(trino, plan, dry_run=dry_run)
 
     for source in sources:
-        prefix = f"{s3.raw_bucket}/{source.name}/"
-        keys = [p[len(s3.raw_bucket) + 1 :] for p in fs.find(prefix)]
+        # landing files and both pipelines' dlt load records (landing and index)
+        prefixes = (f"{s3.raw_bucket}/{source.name}/", f"{s3.raw_bucket}/{s3.index_prefix}/{source.name}/_dlt_loads/")
+        keys = [p[len(s3.raw_bucket) + 1 :] for prefix in prefixes for p in fs.find(prefix)]
         manifests = [k for k in keys if k.startswith(f"{source.name}/{MANIFEST_TABLE}/")]
         committed = {k.rsplit("/", 1)[1].rsplit(".", 2)[0] for k in manifests}
         expired = expired_landing_objects(keys, committed, plan.landing_cutoff, plan.uncommitted_cutoff)
