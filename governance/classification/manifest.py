@@ -173,6 +173,10 @@ def validate(tables: list[TableClass]) -> list[str]:
                 problems.append(f"{t.key}: gdpr.deregistration columns must be documented columns")
             elif t.gdpr.get("subject_column") not in names:
                 problems.append(f"{t.key}: gdpr.deregistration needs gdpr.subject_column")
+        if t.layer == "consolidated" and t.materialized not in ("table", "incremental"):
+            problems.append(
+                f"{t.key}: consolidated models are persisted tables (table or incremental), not {t.materialized}"
+            )
         if t.row_filter is not None and not t.row_filter.get("expression"):
             problems.append(f"{t.key}: meta.row_filter needs an expression")
     return problems

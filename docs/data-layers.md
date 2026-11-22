@@ -87,9 +87,12 @@ index, loading only rows indexed since the previous run.
 `citizens` keeps every delivered state (one row per citizen and change timestamp); that history is
 what makes SCD2 dimensions rebuildable.
 
-## consolidated - business entities (optional)
+## consolidated - business entities (optional per domain)
 
-`transform/models/consolidated/<domain>/`. `consolidated.party.person` presents the person entity in
+`transform/models/consolidated/<domain>/`: persisted Iceberg tables (`table` or `incremental`;
+never views or ephemeral models - `make lint` enforces it) holding business entities, business
+aligned. They hold personal data like clean, so they carry their own erasure and retention meta.
+`consolidated.party.person` presents the person entity in
 business vocabulary, independent of the delivering system; further source systems are added as
 `UNION ALL` branches (the pseudonymised key is identical for the same CPR number in every source).
 

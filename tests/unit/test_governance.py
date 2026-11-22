@@ -459,3 +459,21 @@ def test_retention_dry_run_never_creates_the_queue(monkeypatch):
     trino = ReadOnly()
     assert queue_deregistered(trino, plan, dry_run=True)[0]["queued_for_erasure"] == 0
     assert trino.sql and not any("erasure_requests" in s for s in trino.sql)
+
+
+@pytest.mark.parametrize(
+    ("materialized", "ok"), [("table", True), ("incremental", True), ("view", False), ("ephemeral", False)]
+)
+def test_consolidated_models_are_persisted_tables(materialized, ok):
+    node = model("person", "consolidated", "party", {"x": col("none")}, config={"materialized": materialized})
+    problems = cm.validate(cm.tables_from_manifest(manifest(node)))
+    assert (not any("persisted tables" in p for p in problems)) == ok
+
+
+def test_real_project_consolidated_models_are_persisted():
+    from governance.config import manifest_path
+
+    if not manifest_path().is_file():
+        pytest.skip("dbt manifest missing - run `make dbt-parse`")
+    tables = [t for t in cm.tables_from_manifest(cm.load_manifest(manifest_path())) if t.layer == "consolidated"]
+    assert tables and all(t.materialized in ("table", "incremental") for t in tables)
