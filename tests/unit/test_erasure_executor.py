@@ -66,7 +66,10 @@ class FakeTrino:
 
 @pytest.fixture
 def env(monkeypatch):
+    scopes: dict[str, str] = {}
+
     def plan(request_id, tables, sources, **kwargs):
+        scopes[request_id] = kwargs.get("scope")
         sub = f"select subject_key from q where request_id = '{request_id}'"
         return ErasurePlan(
             request_id=request_id,
@@ -94,11 +97,22 @@ def env(monkeypatch):
     purges: list[tuple] = []
     monkeypatch.setattr(ex, "purge_noncurrent", lambda fs, bucket, prefix="", **k: purges.append((bucket, prefix)) or 0)
     monkeypatch.setattr(ex, "delete_permanently", lambda *a, **k: 0)
-    return {"purges": purges, "histories": histories}
+    return {"purges": purges, "histories": histories, "scopes": scopes}
 
 
 def pending(*rows, scope="full"):
     return [(req, key, "subject_key", "dpo", "ticket", scope) for req, key in rows]
+
+
+def test_one_batch_mixes_full_and_deregistration_requests(env):
+    """The retention policy's deregistrations and art. 17 requests share the nightly batch;
+    each request is planned with its own scope and audited with it."""
+    trino = FakeTrino(pending((REQ_A, KEY_A)) + pending((REQ_B, KEY_B), scope="deregistration"))
+    reports = run(trino)
+    assert env["scopes"] == {REQ_A: "full", REQ_B: "deregistration"}
+    assert [(r.scope, r.status) for r in reports] == [("full", "completed"), ("deregistration", "completed")]
+    details = [p[-1] for s, p in zip(trino.statements, trino.params, strict=True) if "erasure_log" in s and p]
+    assert '"scope": "deregistration"' in details[1]
 
 
 def run(trino):
