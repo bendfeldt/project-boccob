@@ -45,25 +45,22 @@ def build_source_assets(source: SourceSpec) -> list[dg.AssetsDefinition]:
                 kinds={"dlt", "s3", e.format},
                 owners=[f"team:{source.owner}"] if source.owner else [],
                 tags=common_tags,
-                skippable=True,
             )
             for e in source.entities
         ],
     )
     def land(context: dg.AssetExecutionContext, ingestion: IngestionResource):
+        # one result per declared entity, also when nothing came: a skipped output would skip
+        # indexing and dbt for every source and still report the run as successful
         result = ingestion.land(source.name, logical_date=context.partition_key)
-        if not result.committed:
+        delivered = result.summary()["entities"] if result.committed else {}
+        if not delivered:
             context.log.info("source delivered nothing for %s", context.partition_key)
-            return
-        for entity, stats in result.summary()["entities"].items():
+        for e in source.entities:
+            stats = delivered.get(e.name, {"files": 0, "bytes": 0, "records": 0})
             yield dg.MaterializeResult(
-                asset_key=landing_key(source.name, entity),
-                metadata={
-                    "load_id": result.load_id,
-                    "files": stats["files"],
-                    "bytes": stats["bytes"],
-                    "records": stats["records"],
-                },
+                asset_key=landing_key(source.name, e.name),
+                metadata={"load_id": result.load_id or "", **stats},
             )
 
     @dg.multi_asset(

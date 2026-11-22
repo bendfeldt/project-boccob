@@ -133,3 +133,32 @@ def test_purge_tag_sets_only_env_from(monkeypatch):
     finally:
         monkeypatch.delenv("PURGE_CREDENTIALS_SECRET")
         importlib.reload(jobs)
+
+
+@pytest.mark.parametrize("delivered", [[], ["citizens"]])
+def test_partial_or_empty_delivery_still_indexes(delivered):
+    """A day without a file for some (or all) entities must not skip the downstream steps."""
+    import dagster as dg
+
+    from ingestion.framework.indexing import IndexResult
+    from ingestion.framework.landing import LandResult
+    from ingestion.framework.manifest import ManifestEntry
+    from orchestration.assets.ingestion import SOURCES, build_source_assets
+    from orchestration.resources import IngestionResource
+
+    source = next(s for s in SOURCES if s.name == "borgerportal")
+    calls = []
+
+    class Fake(IngestionResource):
+        def land(self, source_name, logical_date=None):
+            files = [ManifestEntry(source_name, e, "1.5", "d", "d", "f", "p", "json", 1, "s", 1, "t") for e in delivered]
+            return LandResult(source_name, "1.5" if files else None, files)
+
+        def index(self, source_name, load_id=None):
+            calls.append(source_name)
+            return IndexResult(source_name)
+
+    result = dg.materialize(build_source_assets(source), resources={"ingestion": Fake()}, partition_key="2026-11-01")
+    assert result.success and calls == ["borgerportal"], "index ran"
+    materialized = {e.asset_key.path[-1] for e in result.get_asset_materialization_events() if e.asset_key}
+    assert {e.name for e in source.entities} <= materialized
