@@ -49,26 +49,35 @@ Generated columns: the surrogate key, `is_inferred`, `is_erased`, and for SCD2 `
 (inclusive; the first version starts at 1900-01-01), `valid_to` (exclusive; 9999-12-31 for the
 current version) and `is_current`. The business key must be a varchar.
 
-A fact model uses three helpers:
+A fact model uses these helpers (full example: `models/curated/borgerservice/fact_payment.sql`):
 
 ```sql
 {{ config(materialized='incremental', unique_key='payment_id', incremental_strategy='merge',
-    pre_hook=["{{ keystore_register_inferred('dim_citizen', ref('payments'), 'citizen_id') }}"],
+    pre_hook=["{{ keystore_register_inferred('dim_citizen', '(select citizen_id from ' ~ ref('payments')
+                ~ raw_incremental_filter('_source_loaded_at') ~ ')', 'citizen_id') }}"],
     post_hook=["{{ keystore_mark_used('dim_citizen', 'citizen_key') }}"]) }}
+with batch as (
+  select * from {{ ref('payments') }} {{ raw_incremental_filter('_source_loaded_at') }}
+  {% if is_incremental() %}
+  union
+  select p.* from {{ ref('payments') }} p
+  where p.payment_id in ({{ keystore_rekey_adopted('dim_citizen', 'citizen_key', 'payment_id') }})
+  {% endif %}
+)
 select p.payment_id, {{ dim_key('dim_citizen', 'ci') }} as citizen_key, ..., {{ audit_columns() }}
-from {{ ref('payments') }} p
+from batch p
 {{ dim_join('dim_citizen', 'ci', 'p.citizen_id', at='p.payment_date') }}
 ```
 
 * `dim_join(..., at=...)` joins the version valid at the event time, so late-arriving facts get the
   historically correct version; without `at` the current version is used.
 * `dim_key` maps a missing business key to `-1`.
-* `keystore_register_inferred` (pre-hook) handles late-arriving dimension members: a business key
-  that occurs in the fact source but has no key yet gets an *inferred* key and a placeholder row in
+* `keystore_register_inferred` (pre-hook, over the new fact source rows only) handles
+  late-arriving dimension members: a business key that occurs in the fact source but has no key yet gets an *inferred* key and a placeholder row in
   the dimension, so the fact is loaded now. When the master data arrives, the earliest version
   adopts that key (`member_type` becomes `regular`, `adopted_at` is set). If the master data arrives
   with several versions and a fact's event falls into a later one, the fact must move to that
-  version: `keystore_rekey_adopted(...)` in the fact's incremental filter re-selects every fact row
+  version: `keystore_rekey_adopted(...)`, a separate branch of the fact's incremental batch, re-selects every fact row
   whose key was adopted after the row was written, and `dim_join` assigns the version valid at the
   event time (test `scd2_version_valid_at_event`). Changes to *regular* members that are backdated
   before already loaded facts are not re-keyed (limit).

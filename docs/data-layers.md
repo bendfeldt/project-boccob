@@ -74,7 +74,8 @@ index, loading only rows indexed since the previous run.
 
 * parse and type (`json_extract_scalar`, Danish decimal and date formats, ISO timestamps)
 * deduplicate on the natural key (newest load wins)
-* denormalise (address into the citizen row, case type into the payment row)
+* denormalise (address into the citizen row, case type into the payment row - also when the case
+  arrives after the payment: the payment row is merged again, and the fact re-keys it)
 * person identifiers replaced by the pseudonymised key from `_subject_keys`; the CPR number itself
   is not carried into clean (it stays in the raw layer only)
 * data quality tests: not null, uniqueness, accepted values, relationships, pseudonym format

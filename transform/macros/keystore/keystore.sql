@@ -242,6 +242,8 @@
       using (
         select distinct {{ key_column }} as surrogate_key from {{ this }}
         where _invocation_id = '{{ invocation_id }}'
+          -- prunes the data files of earlier runs (min/max of _transformed_at); 1 h for clock skew
+          and _transformed_at >= timestamp '{{ run_started_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC' - interval '1' hour
       ) s
       on t.surrogate_key = s.surrogate_key
       when matched then update set
@@ -252,21 +254,17 @@
 {% endmacro %}
 
 {#
-  Incremental fact models: also reprocess fact rows that point at a key adopted since the row
-  was written. A fact loaded while its member was *inferred* got the inferred key; on adoption
-  that key moves to the member's earliest version, while the event may fall into a later
-  version. Re-selecting those rows lets dim_join pick the version valid at the event time
-  (the merge on the fact's unique key replaces the row).
-  Usage inside the incremental filter:  where <new rows> {{ keystore_rekey_adopted('dim_citizen', 'citizen_key', 'p.payment_id', 'payment_id') }}
+  Incremental fact models: ids of fact rows that point at a key adopted since the row was
+  written. A fact loaded while its member was *inferred* got the inferred key; on adoption that
+  key moves to the member's earliest version, while the event may fall into a later version.
+  Re-selecting those rows lets dim_join pick the version valid at the event time (the merge on
+  the fact's unique key replaces the row). Use it as a separate branch of the incremental batch
+  (fact_payment.sql), not as an `or` in the filter: that would stop the pushdown on _loaded_at.
 #}
-{% macro keystore_rekey_adopted(dimension, key_column, source_id, fact_id) -%}
-  {%- if is_incremental() %}
-  or {{ source_id }} in (
-    select f.{{ fact_id }} from {{ this }} f
-    join {{ keystore_relation(dimension) }} k on k.surrogate_key = f.{{ key_column }}
-    where k.adopted_at is not null and k.adopted_at > f._transformed_at
-  )
-  {%- endif %}
+{% macro keystore_rekey_adopted(dimension, key_column, fact_id) -%}
+  select f.{{ fact_id }} from {{ this }} f
+  join {{ keystore_relation(dimension) }} k on k.surrogate_key = f.{{ key_column }}
+  where k.adopted_at is not null and k.adopted_at > f._transformed_at
 {%- endmacro %}
 
 {# run-operation: store the current key assignment of a dimension as a baseline for the

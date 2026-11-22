@@ -1,0 +1,25 @@
+version: 2
+
+# dbt unit tests: run by `dbt build` (integration test, Dagster transform job) before the model.
+unit_tests:
+  - name: payment_gets_its_case_type_when_the_case_arrives_late
+    description: >
+      A payment loaded before its case keeps case_type_code NULL only until the case exists;
+      the next incremental run merges the row again with the case type (no new raw rows needed).
+    model: payments
+    overrides:
+      macros:
+        is_incremental: true
+    given:
+      - input: source('raw_borgerportal', 'payments')
+        rows: []
+      - input: ref('cases')
+        rows:
+          - {case_id: C-1, case_type_code: KT}
+      - input: this
+        rows:
+          - {payment_id: P-1, case_id: C-1, case_type_code: null, _loaded_at: "2026-11-01 00:00:00.000000 UTC"}
+          - {payment_id: P-2, case_id: C-9, case_type_code: null, _loaded_at: "2026-11-01 00:00:00.000000 UTC"}
+    expect:
+      rows:
+        - {payment_id: P-1, case_id: C-1, case_type_code: KT}

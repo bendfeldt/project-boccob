@@ -63,4 +63,29 @@ where p._rn = 1
 {% if is_incremental() %}
   -- an older state (e.g. a re-delivered or re-indexed load) never overwrites a newer one
   and not exists (select 1 from {{ this }} t where t.payment_id = p.payment_id and t.booked_at > p.booked_at)
+
+union all
+
+-- late case: a payment that arrived before its case gets the case type once the case is there
+select
+  t.payment_id,
+  t.case_id,
+  t.citizen_id,
+  c.case_type_code,
+  t.amount,
+  t.currency_code,
+  t.payment_date,
+  t.booked_at,
+  t.status,
+  t._raw_file,
+  t._raw_row,
+  t._load_id,
+  t._loaded_at,
+  t._anonymised_at,
+  {{ audit_columns() }}
+from {{ this }} t
+join {{ ref('cases') }} c on c.case_id = t.case_id
+where t.case_type_code is null
+  and c.case_type_code is not null
+  and t.payment_id not in (select payment_id from deduplicated)
 {% endif %}
