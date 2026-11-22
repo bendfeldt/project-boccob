@@ -7,7 +7,8 @@
 #   4. right to erasure (queued with the CLI in the code location pod, Dagster job `erasure`):
 #      subject gone everywhere, audit row, queue empty, no key in Trino's query history
 #   5. deregistration scope: person gone, payments and cases kept anonymised
-#   6. only erasure runs get the purge credential; the code location itself has none
+#   6. only erasure runs get the purge credential; the code location itself has none; forged
+#      dagster-k8s/config run tags on a non-purge job fail before any Job exists
 #   7. dbt refuses a full refresh of incremental models outside dev
 #
 #   BOCCOB_PLATFORM_ENV=<file> make e2e            everything
@@ -60,13 +61,13 @@ dagster_gql() {
 req = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={"Content-Type": "application/json"})
 print(urllib.request.urlopen(req, timeout=60).read().decode())' "$BOCCOB_DAGSTER_GRAPHQL_URL"
 }
-launch() { # launch <job> [partition] -> run id
-  jq -n --arg job "$1" --arg p "${2:-}" --arg loc "$BOCCOB_CODE_LOCATION_NAME" '{
+launch() { # launch <job> [partition] [extra tags, JSON array of {key,value}] -> run id
+  jq -n --arg job "$1" --arg p "${2:-}" --argjson extra "${3:-[]}" --arg loc "$BOCCOB_CODE_LOCATION_NAME" '{
     query: "mutation($p: ExecutionParams!) { launchRun(executionParams: $p) { __typename ... on LaunchRunSuccess { run { runId } } ... on PythonError { message } ... on RunConfigValidationInvalid { errors { message } } ... on InvalidSubsetError { message } } }",
     variables: { p: {
       selector: { repositoryLocationName: $loc, repositoryName: "__repository__", jobName: $job },
       runConfigData: {},
-      executionMetadata: { tags: (if $p == "" then [] else [{key: "dagster/partition", value: $p}] end) }
+      executionMetadata: { tags: ((if $p == "" then [] else [{key: "dagster/partition", value: $p}] end) + $extra) }
     } } }' | dagster_gql | jq -r '.data.launchRun | if .__typename == "LaunchRunSuccess" then .run.runId else error(tostring) end'
 }
 wait_run() { # wait_run <run id> [timeout s] : fails unless SUCCESS
@@ -214,6 +215,25 @@ if [[ -n "$purge_secret" ]]; then
   expect "the erasure run pod gets $purge_secret" yes "$([[ ",$(envfrom "$erasure_run")," == *",$purge_secret,"* ]] && echo yes || echo no)"
   run_job "migrate (a job without purge)" migrate
   expect "a migrate run pod does not" no "$([[ ",$(envfrom "$RUN")," == *",$purge_secret,"* ]] && echo yes || echo no)"
+  # run-tag forgery: a Dagster UI user sets dagster-k8s/config on a non-purge job; the platform
+  # (launcher allowlist, run-Job admission) must fail the run before any Job exists
+  forged() { # forged <description> <dagster-k8s/config JSON>
+    local run status jobs
+    run="$(launch migrate "" "$(jq -cn --arg v "$2" '[{key: "dagster-k8s/config", value: $v}]')")" \
+      || { bad "$1: launch failed"; return; }
+    wait_run "$run" 300 >/dev/null 2>&1 || true
+    status="$(jq -n --arg id "$run" '{query: "query($id: ID!) { runOrError(runId: $id) { ... on Run { status } } }", variables: {id: $id}}' \
+      | dagster_gql | jq -r '.data.runOrError.status')"
+    jobs="$(kc get job -l "dagster/run-id=$run" --no-headers 2>/dev/null | wc -l)"
+    expect "$1" "FAILURE, 0 Job(s)" "$status, $jobs Job(s)"
+  }
+  purge_from='{"secret_ref": {"name": "'"$purge_secret"'"}}'
+  forged "forged run tag: command override + purge Secret refused" \
+    '{"container_config": {"command": ["sh", "-c", "env"], "env_from": ['"$purge_from"']}}'
+  forged "forged run tag: purge Secret on a non-purge job refused" \
+    '{"container_config": {"env_from": ['"$purge_from"']}}'
+  forged "forged run tag: forged dagster/job label refused" \
+    '{"pod_template_spec_metadata": {"labels": {"dagster/job": "erasure"}}, "container_config": {"env_from": ['"$purge_from"']}}'
 else
   bad "PURGE_CREDENTIALS_SECRET is not set on the code location"
 fi
