@@ -155,7 +155,7 @@ def test_partial_or_empty_delivery_still_indexes(delivered):
 
     class Fake(IngestionResource):
         def land(self, source_name, logical_date=None):
-            files = [ManifestEntry(source_name, e, "1.5", "d", "d", "f", "p", "json", 1, "s", 1, "t") for e in delivered]
+            files = [ManifestEntry(source_name, e, "1.5", "d", "d", "f", "p", "j", 1, "s", 1, "t") for e in delivered]
             return LandResult(source_name, "1.5" if files else None, files)
 
         def index(self, source_name, load_id=None):
