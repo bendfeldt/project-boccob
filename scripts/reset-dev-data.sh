@@ -58,4 +58,4 @@ for layer in LAYERS:
     removed = _delete_versions(fs, bucket, versions) if versions else 0
     print(f"{bucket}: {removed} object versions / delete markers removed")
 '
-log "lakehouse data of $BOCCOB_ENV reset - run the Dagster job migrate (or transform) next"
+log "lakehouse data of $BOCCOB_ENV reset - next: the Dagster job migrate, then ingest before transform (make e2e runs both)"
