@@ -23,9 +23,8 @@ resource := object.get(input.action, "resource", {})
 
 # --- identity -----------------------------------------------------------------------------
 
+# groups come only from Trino's group provider (Keycloak groups, static service account entries)
 groups contains g if some g in object.get(identity, "groups", [])
-
-groups contains g if some g in object.get(object.get(config.principals, identity.user, {}), "groups", [])
 
 is_admin if config.admin_group in groups
 

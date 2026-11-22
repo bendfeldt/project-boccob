@@ -329,11 +329,11 @@ test_batch_filter_columns_single_table if {
 	result == {0, 1}
 }
 
-# --- static principal mapping ---------------------------------------------------------------
+# --- groups come from Trino only -------------------------------------------------------------
 
-test_groups_from_bundle_principals if {
+test_bundle_data_cannot_grant_groups if {
 	inp := table_input("svc-dbt", [], "InsertIntoTable", "clean", "borgerportal", "citizens")
-	trino.allow with input as inp
+	not trino.allow with input as inp
 		with data.lakehouse.classification as classification
 		with data.lakehouse.config.principals as {"svc-dbt": {"groups": ["data-engineer", "pii-reader"]}}
 }

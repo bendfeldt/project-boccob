@@ -63,7 +63,3 @@ catalogs:
       dbt_test_audit:
         read: [data-engineer]
         unclassified: allow
-
-# Optional static group membership for principals whose groups Trino cannot resolve itself
-# (e.g. service accounts). Empty by default; the platform may overlay it.
-principals: {}

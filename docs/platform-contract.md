@@ -75,10 +75,9 @@ opa.policy.batch-column-masking-uri=https://opa.query.svc:8181/v1/data/trino/bat
 * The policy decides on `input.context.identity.groups`. Trino must therefore resolve the Keycloak
   groups of a user (group provider), with exactly these names:
   `platform-admin`, `data-engineer`, `analyst`, `pii-reader`, `auditor`, `lakehouse-service`.
-  Service accounts get their groups from static entries in Trino's file group provider (as deployed:
-  the IaC variable `trino_service_accounts`). The policy still supports an OPA data overlay
-  `data.lakehouse.config.principals` = `{"<user>": {"groups": [...]}}` as an alternative; on the
-  platform it stays empty.
+  Service accounts get their groups from static entries in Trino's file group provider. Groups
+  come only from Trino: OPA data cannot grant any, so every membership stays in the identity
+  provider's access review.
 * The service account used by Dagster/dbt (`TRINO_USER`, `svc-dagster`) must be in **`data-engineer`,
   `pii-reader` and `lakehouse-service`**. Without `pii-reader` it would transform masked values; without
   `lakehouse-service` it cannot write the protected schemas `curated.keystore`, `curated.audit`
