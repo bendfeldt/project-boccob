@@ -28,9 +28,14 @@ load_platform_env BOCCOB_ENV BOCCOB_KUBECONFIG BOCCOB_CA_BUNDLE BOCCOB_TRINO_URL
   BOCCOB_DAGSTER_NAMESPACE BOCCOB_CODE_LOCATION BOCCOB_CODE_LOCATION_NAME BOCCOB_DAGSTER_WEBSERVER \
   BOCCOB_DAGSTER_GRAPHQL_URL \
   BOCCOB_TEST_ANALYST_USER BOCCOB_TEST_ANALYST_PASSWORD_FILE BOCCOB_TEST_PII_READER_USER \
-  BOCCOB_TEST_PII_READER_PASSWORD_FILE
+  BOCCOB_TEST_PII_READER_PASSWORD_FILE BOCCOB_TEST_AUDITOR_USER BOCCOB_TEST_AUDITOR_PASSWORD_FILE
 [[ "$BOCCOB_ENV" == "dev" || "${ALLOW_E2E:-0}" == "1" ]] || die "e2e writes test data: dev only (ALLOW_E2E=1 to override)"
 cd "$ROOT"
+# the public endpoints are reached directly, never through a proxy of the developer machine
+for u in "$BOCCOB_TRINO_URL" "$BOCCOB_KEYCLOAK_URL"; do
+  h="${u#*://}"; h="${h%%/*}"; h="${h%%:*}"
+  export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$h" no_proxy="${no_proxy:+$no_proxy,}$h"
+done
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 PASS=0; FAIL=0
@@ -105,7 +110,7 @@ as_user() {
   host="${BOCCOB_TRINO_URL#https://}"; host="${host%%/*}"; port="${host##*:}"; host="${host%%:*}"
   [[ "$port" != "$host" ]] || port=443
   printf '%s' "$3" | TRINO_HOST="$host" TRINO_PORT="$port" TRINO_HTTP_SCHEME=https TRINO_USER="$1" \
-    TRINO_JWT_TOKEN="$2" TRINO_PASSWORD="" TRINO_CA_BUNDLE="$BOCCOB_CA_BUNDLE" REQUESTS_CA_BUNDLE="$BOCCOB_CA_BUNDLE" uv run --no-sync python -I -c 'import json, sys
+    TRINO_JWT_TOKEN="$2" TRINO_PASSWORD="" TRINO_CA_BUNDLE="$BOCCOB_CA_BUNDLE" REQUESTS_CA_BUNDLE="$BOCCOB_CA_BUNDLE" uv run --quiet --no-sync python -I -c 'import json, sys
 from lakehouse.trino_client import TrinoClient
 for row in TrinoClient(source="boccob-e2e").execute(sys.stdin.read()):
     print(json.dumps(row, default=str))' 2>&1
@@ -194,8 +199,10 @@ done
 expect "audit row of the erasure (completed)" completed \
   "$(one "select status from curated.audit.erasure_log where reason like '$reason (request %'")"
 expect "erasure queue empty" 0 "$(one "select count(*) from raw.governance.erasure_requests")"
+# query history is readable only by observers (group auditor), not by the pipeline account
+auditor="$BOCCOB_TEST_AUDITOR_USER"; axel="$(token "$auditor" "$BOCCOB_TEST_AUDITOR_PASSWORD_FILE")"
 expect "no pipeline query in Trino's history carries the subject key" 0 \
-  "$(one "select count(*) from system.runtime.queries where strpos(query, '$key') > 0 and source <> 'boccob-e2e'")"
+  "$(as_user "$auditor" "$axel" "select count(*) from system.runtime.queries where strpos(query, '$key') > 0 and source <> 'boccob-e2e'" | jq -r '.[0]')"
 if [[ -n "${dkey:-}" && "$dkey" != null ]]; then
   expect "deregistered person gone from clean.borgerportal.citizens" 0 \
     "$(one "select count(*) from clean.borgerportal.citizens where citizen_id = '$dkey'")"

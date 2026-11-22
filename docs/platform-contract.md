@@ -237,6 +237,7 @@ solution uses:
 | `BOCCOB_KEYCLOAK_CLIENT_ID` / `BOCCOB_KEYCLOAK_CLIENT_SECRET_FILE` | e2e | OIDC client of Trino with direct access grants enabled (dev only), and the file holding its secret |
 | `BOCCOB_TEST_ANALYST_USER` / `BOCCOB_TEST_ANALYST_PASSWORD_FILE` | e2e | a test user in group `analyst` only, and its password file |
 | `BOCCOB_TEST_PII_READER_USER` / `BOCCOB_TEST_PII_READER_PASSWORD_FILE` | e2e | a test user in `analyst` and `pii-reader`, and its password file |
+| `BOCCOB_TEST_AUDITOR_USER` / `BOCCOB_TEST_AUDITOR_PASSWORD_FILE` | e2e | a test user in group `auditor` only (reads Trino's query history), and its password file |
 
 `make e2e` also relies on what sections 1-3 already require: Dagster's K8sRunLauncher labels run
 jobs `dagster/run-id=<id>`, and the code location's `PURGE_CREDENTIALS_SECRET` names the Secret
