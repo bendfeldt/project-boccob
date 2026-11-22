@@ -136,7 +136,7 @@ Set by the image, normally left alone: `DBT_PROJECT_DIR=/app/transform`, `DBT_PR
 
 ## 3. What the platform must provide
 
-Verified against the integration harness (RustFS v1.0.0-rc.5, Polaris 1.9.0, Trino 484, OPA 1.22.4);
+Verified against the integration harness (RustFS 1.0.6, Polaris 1.9.0, Trino 484, OPA 1.22.4);
 the harness files in `tests/integration/` are a working reference configuration.
 
 **Object storage (RustFS)**
