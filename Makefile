@@ -17,8 +17,8 @@ setup: ## Create the virtualenv from the lockfile (uv)
 tools: ## Install pinned opa + oras into .tools/bin
 	scripts/install-tools.sh opa oras
 
-tools-supply-chain: ## Install pinned syft, trivy, cosign into .tools/bin
-	scripts/install-tools.sh syft trivy cosign
+tools-supply-chain: ## Install pinned syft, trivy into .tools/bin (SBOM + vulnerability scan)
+	scripts/install-tools.sh syft trivy
 
 lint: ## ruff, shellcheck, opa fmt/check, dbt parse, PII classification check
 	scripts/lint.sh

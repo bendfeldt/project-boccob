@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Publish the OPA bundle as an OCI artifact (the layout OPA's OCI bundle downloader expects).
-# Stable interface (called by the IaC `make release-publish`; documented in docs/releases.md):
 #   REGISTRY           registry host[:port], e.g. zot.dev.lakehouse.internal   (required)
 #   REGISTRY_NAMESPACE repository prefix, default "boccob"
 #   VERSION            artifact version (default 0.1.0-<git describe>)
 #   REGISTRY_CA_FILE   CA (PEM) of the registry certificate, passed to oras as --ca-file
 #   REGISTRY_HOST      host[:port] added to NO_PROXY/no_proxy for this run (default: from REGISTRY)
 #   REGISTRY_PLAIN_HTTP=1 for a registry without TLS (local testing only)
-#   credentials: `oras login` beforehand, or REGISTRY_USERNAME / REGISTRY_PASSWORD
+#   credentials: REGISTRY_USERNAME / REGISTRY_PASSWORD (temporary auth file), or `oras login` beforehand
 # Result: <REGISTRY>/<REGISTRY_NAMESPACE>/opa-policy-bundle:<VERSION>  (digest in dist/opa/bundle.ref)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -17,13 +16,14 @@ need oras
 VERSION="$(artifact_version)"
 REF="${REGISTRY}/${REGISTRY_NAMESPACE:-boccob}/opa-policy-bundle:${VERSION}"
 OUT="$ROOT/dist/opa"
-[[ -f "$OUT/bundle.tar.gz" ]] || "$ROOT/scripts/build-opa-bundle.sh" >/dev/null
+# always rebuild (under a second): a stale tarball must never be published under a new version
+"$ROOT/scripts/build-opa-bundle.sh" >/dev/null
 
 registry_trust
 flags=("${REGISTRY_ORAS_ARGS[@]}")
 [[ "${REGISTRY_PLAIN_HTTP:-0}" == "1" ]] && flags+=(--plain-http)
 if [[ -n "${REGISTRY_USERNAME:-}" ]]; then
-  printf '%s' "${REGISTRY_PASSWORD:?}" | oras login "${flags[@]}" -u "$REGISTRY_USERNAME" --password-stdin "$REGISTRY"
+  printf '%s' "${REGISTRY_PASSWORD:?}" | oras login "${flags[@]}" -u "$REGISTRY_USERNAME" --password-stdin "$REGISTRY" >/dev/null
 fi
 
 cd "$OUT"
@@ -34,7 +34,7 @@ oras push "${flags[@]}" "$REF" \
   --annotation "org.opencontainers.image.title=boccob-opa-policy-bundle" \
   --export-manifest manifest.json \
   bundle.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
-digest="sha256:$(sha256sum manifest.json | awk '{print $1}')"
+digest="sha256:$(sha256_file manifest.json)"
 echo "${REF%:*}@${digest}" > bundle.ref
 log "pushed $REF ($digest)"
 cat bundle.ref

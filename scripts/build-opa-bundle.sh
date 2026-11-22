@@ -13,6 +13,6 @@ opa check --strict "$ROOT/governance/policies"
 (cd "$ROOT/governance/policies" && opa build --bundle . --ignore '*_test.rego' \
   --revision "$VERSION" --output "$OUT/bundle.tar.gz")
 chmod 0644 "$OUT/bundle.tar.gz"
-(cd "$OUT" && sha256sum bundle.tar.gz > bundle.tar.gz.sha256)
+printf '%s  bundle.tar.gz\n' "$(sha256_file "$OUT/bundle.tar.gz")" > "$OUT/bundle.tar.gz.sha256"
 log "built $OUT/bundle.tar.gz (revision $VERSION)"
 echo "$OUT/bundle.tar.gz"

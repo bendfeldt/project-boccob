@@ -2,7 +2,8 @@
 # Install pinned CLI tools into .tools/bin (no root needed). Downloads come from GitHub releases
 # and are verified against the checksum files published with each release. The build matches
 # this machine: linux/amd64 (x64), linux/arm64 or darwin/arm64 (Apple Silicon); see host_platform.
-#   usage: scripts/install-tools.sh [opa] [oras] [syft] [trivy] [cosign]   (default: opa oras)
+#   usage: scripts/install-tools.sh [opa] [oras] [syft] [trivy]   (default: opa oras)
+# Signing (cosign) is a platform function: the platform holds the key.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -10,7 +11,6 @@ OPA_VERSION="${OPA_VERSION:-1.22.4}"
 ORAS_VERSION="${ORAS_VERSION:-1.3.6}"
 SYFT_VERSION="${SYFT_VERSION:-1.57.1}"
 TRIVY_VERSION="${TRIVY_VERSION:-0.76.2}"
-COSIGN_VERSION="${COSIGN_VERSION:-3.1.4}"
 
 BIN="$ROOT/.tools/bin"
 TMP="$(mktemp -d)"
@@ -67,19 +67,10 @@ install_trivy() {
   esac
   install_tarball trivy "$base/trivy_${TRIVY_VERSION}_${name}.tar.gz" "$base/trivy_${TRIVY_VERSION}_checksums.txt" trivy
 }
-install_cosign() {
-  local base="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
-  local f="cosign-${OS}-${ARCH}"
-  fetch "$base/$f" "$TMP/$f"
-  fetch "$base/cosign_checksums.txt" "$TMP/cosign.sums"
-  verify "$TMP/$f" "$TMP/cosign.sums"
-  install -m 0755 "$TMP/$f" "$BIN/cosign"
-}
-
 tools=("$@"); [[ ${#tools[@]} -gt 0 ]] || tools=(opa oras)
 for tool in "${tools[@]}"; do
   case "$tool" in
-    opa|oras|syft|trivy|cosign) log "installing $tool"; "install_$tool" ;;
+    opa|oras|syft|trivy) log "installing $tool"; "install_$tool" ;;
     *) die "unknown tool $tool" ;;
   esac
 done

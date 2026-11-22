@@ -33,7 +33,7 @@ host_platform() {
     i?86|x86) die "32-bit x86 ($m) is not supported: x64 (x86_64/amd64) or arm64 only" ;;
     *) die "CPU architecture $m is not supported: x64 (x86_64/amd64) or arm64 only" ;;
   esac
-  [[ "$os/$arch" != darwin/amd64 ]] || die "Intel Macs are not supported by the pinned tool downloads (install opa/oras/syft/trivy/cosign with Homebrew)"
+  [[ "$os/$arch" != darwin/amd64 ]] || die "Intel Macs are not supported by the pinned tool downloads (install opa/oras/syft/trivy with Homebrew)"
   printf '%s/%s' "$os" "$arch"
 }
 
@@ -74,33 +74,34 @@ artifact_version() {
   echo "0.1.0-${v}"
 }
 
-# Registry trust and proxy bypass for one publishing script, from the environment only
+# Registry trust, credentials and proxy bypass for one publishing script, from the environment only
 # (no writes to /etc, nothing persists after the script):
 #   REGISTRY_CA_FILE  PEM of the CA that signed the registry certificate (e.g. the platform PKI)
 #   REGISTRY_HOST     host[:port] to bypass the proxy for (default: host part of REGISTRY)
-# Sets REGISTRY_PODMAN_ARGS (--cert-dir <temp dir with ca.crt>) and REGISTRY_ORAS_ARGS (--ca-file),
-# exports SSL_CERT_FILE (system trust + the CA, for cosign) and appends the host to NO_PROXY/no_proxy.
+#   REGISTRY_USERNAME login into a temporary auth file (podman REGISTRY_AUTH_FILE, oras
+#                     --registry-config), removed with the temporary directory: no standing push
+#                     credential stays on the build host. Without it, an existing login is used.
+# Sets REGISTRY_PODMAN_ARGS (--cert-dir <temp dir with ca.crt>) and REGISTRY_ORAS_ARGS (--ca-file,
+# --registry-config) and appends the host to NO_PROXY/no_proxy.
 # shellcheck disable=SC2034 # read by the scripts that source lib.sh
 REGISTRY_PODMAN_ARGS=() REGISTRY_ORAS_ARGS=()
 # shellcheck disable=SC2034
 registry_trust() {
   local host="${REGISTRY_HOST:-${REGISTRY%%/*}}"
+  REGISTRY_TRUST_DIR="$(mktemp -d)"
+  # shellcheck disable=SC2064 # expand now: the path is fixed for this script
+  trap "rm -rf -- '$REGISTRY_TRUST_DIR'" EXIT
   if [[ -n "${REGISTRY_CA_FILE:-}" ]]; then
     [[ -r "$REGISTRY_CA_FILE" ]] || die "REGISTRY_CA_FILE=$REGISTRY_CA_FILE is not readable"
     grep -q "BEGIN CERTIFICATE" "$REGISTRY_CA_FILE" || die "REGISTRY_CA_FILE is not a PEM certificate"
-    REGISTRY_TRUST_DIR="$(mktemp -d)"
-    # shellcheck disable=SC2064 # expand now: the path is fixed for this script
-    trap "rm -rf -- '$REGISTRY_TRUST_DIR'" EXIT
     mkdir -p "$REGISTRY_TRUST_DIR/certs"
     cp "$REGISTRY_CA_FILE" "$REGISTRY_TRUST_DIR/certs/ca.crt"
-    local system=""  # keep the trust already in effect (e.g. an inspecting proxy's CA), add the registry CA
-    for f in "${SSL_CERT_FILE:-}" /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
-      [[ -r "$f" ]] && { system="$f"; break; }
-    done
-    { [[ -n "$system" ]] && cat "$system"; cat "$REGISTRY_CA_FILE"; } > "$REGISTRY_TRUST_DIR/bundle.pem"
     REGISTRY_PODMAN_ARGS=(--cert-dir "$REGISTRY_TRUST_DIR/certs")
     REGISTRY_ORAS_ARGS=(--ca-file "$REGISTRY_CA_FILE")
-    export SSL_CERT_FILE="$REGISTRY_TRUST_DIR/bundle.pem"
+  fi
+  if [[ -n "${REGISTRY_USERNAME:-}" ]]; then
+    export REGISTRY_AUTH_FILE="$REGISTRY_TRUST_DIR/auth.json"
+    REGISTRY_ORAS_ARGS+=(--registry-config "$REGISTRY_AUTH_FILE")
   fi
   if [[ -n "$host" ]]; then
     local entries="$host"
