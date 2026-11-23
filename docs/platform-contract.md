@@ -96,7 +96,7 @@ to a mounted file; the dbt profile reads plain variables only.
 
 | Variable | Secret | Default | Meaning |
 |---|---|---|---|
-| `S3_ENDPOINT_URL` | | (AWS) | RustFS S3 endpoint, e.g. `https://rustfs.storage.svc:9000` |
+| `S3_ENDPOINT_URL` | | (AWS) | RustFS S3 endpoint (as deployed: `https://rustfs-svc.storage.svc:9000`) |
 | `S3_ACCESS_KEY_ID` | yes | | access key with read/write on the raw bucket (dlt, erasure queue) and read on all layer buckets (as deployed: S3 user `lakehouse-orchestration`) |
 | `S3_SECRET_ACCESS_KEY` | yes | | |
 | `S3_REGION` | | `us-east-1` | region name configured in RustFS / Polaris |

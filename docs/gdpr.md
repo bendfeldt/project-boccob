@@ -72,7 +72,7 @@ Groups are the Keycloak groups of the architecture contract.
   (the record text cannot be masked field by field).
 * Pipeline service accounts must be in `data-engineer` **and** `pii-reader`; a masked pipeline would
   write masked values downstream.
-* 36 policy unit tests (`make opa-test`); the same rules are exercised through a real Trino in the
+* 41 policy unit tests (`make opa-test`); the same rules are exercised through a real Trino in the
   integration test.
 
 ## Pseudonymisation and CPR handling
